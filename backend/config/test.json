@@ -1,0 +1,16 @@
+{
+  "server": {
+    "port": 3001,
+    "host": "localhost"
+  },
+  "telegram": {
+    "apiId": "test_api_id",
+    "apiHash": "test_api_hash"
+  },
+  "database": {
+    "path": "./data/test.db"
+  },
+  "security": {
+    "encryptionKey": "test_encryption_key_32_characters_long_for_aes256"
+  }
+}

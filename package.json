@@ -1,0 +1,41 @@
+{
+  "name": "telegram-channel-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram频道/群组管理系统",
+  "scripts": {
+    "dev": "pnpm --parallel -r dev",
+    "dev:backend": "pnpm --filter @telegram-manager/backend dev",
+    "dev:frontend": "pnpm --filter @telegram-manager/frontend dev",
+    "build": "pnpm -r build",
+    "build:backend": "pnpm --filter @telegram-manager/backend build",
+    "build:frontend": "pnpm --filter @telegram-manager/frontend build",
+    "start": "pnpm --filter @telegram-manager/backend start",
+    "clean": "pnpm -r clean",
+    "lint": "pnpm -r lint",
+    "lint:fix": "pnpm -r lint:fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "install:all": "pnpm install"
+  },
+  "keywords": [
+    "telegram",
+    "channel-manager",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@typescript-eslint/eslint-plugin": "^8.55.0",
+    "@typescript-eslint/parser": "^8.55.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "prettier": "^3.8.1"
+  }
+}

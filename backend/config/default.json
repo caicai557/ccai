@@ -1,0 +1,20 @@
+{
+  "server": {
+    "port": 3000,
+    "host": "localhost"
+  },
+  "telegram": {
+    "apiId": "",
+    "apiHash": ""
+  },
+  "database": {
+    "path": "./data/telegram-manager.db"
+  },
+  "security": {
+    "encryptionKey": ""
+  },
+  "rateLimit": {
+    "messagesPerSecond": 1,
+    "messagesPerDay": 200
+  }
+}

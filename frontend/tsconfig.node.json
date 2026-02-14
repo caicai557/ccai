@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    // 项目引用
+    "composite": true,
+
+    // 目标和模块
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // 严格模式
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+
+    // 模块解析
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    // 其他选项
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["vite.config.ts"]
+}

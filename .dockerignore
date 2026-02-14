@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+frontend/dist
+backend/dist
+backend/data
+backend/logs
+.git
+.gitignore
+.vscode
+.kiro
+docs
+91老.zip

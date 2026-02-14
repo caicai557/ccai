@@ -1,0 +1,7 @@
+# 忽略本地配置文件
+local.json
+local-*.json
+production.json
+
+# 忽略包含敏感信息的配置
+*.secret.json
