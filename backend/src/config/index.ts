@@ -148,7 +148,7 @@ export const getDiscoveryConfig = (): DiscoveryConfig => {
     enabled: process.env['DISCOVERY_ENABLED'] !== 'false',
     geminiEnabled: process.env['DISCOVERY_GEMINI_ENABLED'] !== 'false',
     geminiApiKey: process.env['GEMINI_API_KEY']?.trim(),
-    geminiModel: process.env['GEMINI_MODEL']?.trim() || 'gemini-2.0-flash',
+    geminiModel: process.env['GEMINI_MODEL']?.trim() || 'gemini-3-flash-preview',
     requestTimeoutMs: Number(process.env['GEMINI_TIMEOUT_MS'] || 8000),
   };
 };
