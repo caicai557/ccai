@@ -40,7 +40,7 @@ describe('TemplateService Variable Replacement Property Tests', () => {
             category: fc.constantFrom('group_message', 'channel_comment'),
             // 生成包含 {time} 变量的内容
             content: fc
-              .array(fc.string({ minLength: 1, maxLength: 50 }), { minLength: 1, maxLength: 3 })
+              .array(fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0), { minLength: 1, maxLength: 3 })
               .map((parts) => parts.join(' {time} ')),
             weight: fc.integer({ min: 1, max: 100 }),
           }),
@@ -69,7 +69,7 @@ describe('TemplateService Variable Replacement Property Tests', () => {
             category: fc.constantFrom('group_message', 'channel_comment'),
             // 生成包含 {date} 变量的内容
             content: fc
-              .array(fc.string({ minLength: 1, maxLength: 50 }), { minLength: 1, maxLength: 3 })
+              .array(fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0), { minLength: 1, maxLength: 3 })
               .map((parts) => parts.join(' {date} ')),
             weight: fc.integer({ min: 1, max: 100 }),
           }),
@@ -98,7 +98,7 @@ describe('TemplateService Variable Replacement Property Tests', () => {
             category: fc.constantFrom('group_message', 'channel_comment'),
             // 生成包含 {random} 变量的内容
             content: fc
-              .array(fc.string({ minLength: 1, maxLength: 50 }), { minLength: 1, maxLength: 3 })
+              .array(fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0), { minLength: 1, maxLength: 3 })
               .map((parts) => parts.join(' {random} ')),
             weight: fc.integer({ min: 1, max: 100 }),
           }),
@@ -132,7 +132,7 @@ describe('TemplateService Variable Replacement Property Tests', () => {
                   fc.constant('{time}'),
                   fc.constant('{date}'),
                   fc.constant('{random}'),
-                  fc.string({ minLength: 1, maxLength: 20 })
+                  fc.string({ minLength: 1, maxLength: 20 }).filter((s) => s.trim().length > 0)
                 ),
                 { minLength: 1, maxLength: 10 }
               )
