@@ -11,6 +11,7 @@ export class TargetDao extends BaseDao<Target> {
       id,
       type,
       telegram_id AS telegramId,
+      invite_link AS inviteLink,
       title,
       enabled,
       created_at AS createdAt,
@@ -48,19 +49,35 @@ export class TargetDao extends BaseDao<Target> {
     return stmt.all() as Target[];
   }
 
+  findByTelegramId(telegramId: string): Target | undefined {
+    const stmt = this.db.prepare(`${this.baseSelect} WHERE telegram_id = ?`);
+    return stmt.get(telegramId) as Target | undefined;
+  }
+
+  findByTelegramIds(telegramIds: string[]): Target[] {
+    if (telegramIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = telegramIds.map(() => '?').join(', ');
+    const stmt = this.db.prepare(`${this.baseSelect} WHERE telegram_id IN (${placeholders})`);
+    return stmt.all(...telegramIds) as Target[];
+  }
+
   create(data: Partial<Target>): Target {
     const id = this.generateId();
     const now = this.now();
 
     const stmt = this.db.prepare(`
-      INSERT INTO targets (id, type, telegram_id, title, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO targets (id, type, telegram_id, invite_link, title, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       id,
       data.type,
       data.telegramId,
+      data.inviteLink || null,
       data.title,
       data.enabled !== undefined ? (data.enabled ? 1 : 0) : 1,
       now,
@@ -78,6 +95,10 @@ export class TargetDao extends BaseDao<Target> {
     if (data.title !== undefined) {
       fields.push('title = ?');
       values.push(data.title);
+    }
+    if (data.inviteLink !== undefined) {
+      fields.push('invite_link = ?');
+      values.push(data.inviteLink || null);
     }
     if (data.enabled !== undefined) {
       fields.push('enabled = ?');

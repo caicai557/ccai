@@ -3,6 +3,7 @@ export interface Target {
   id: string;
   type: 'group' | 'channel';
   telegramId: string;
+  inviteLink?: string;
   title: string;
   enabled: boolean;
   createdAt: Date;
@@ -23,4 +24,27 @@ export interface AddTargetRequest {
 
 export interface UpdateTargetRequest {
   enabled?: boolean;
+}
+
+export interface DiscoveredTarget {
+  type: 'group' | 'channel';
+  telegramId: string;
+  title: string;
+  username?: string;
+  inviteLink?: string;
+}
+
+export interface BatchAddTargetsResult {
+  created: Target[];
+  duplicated: Target[];
+  failed: Array<{
+    telegramId: string;
+    title: string;
+    reason: string;
+  }>;
+  summary: {
+    created: number;
+    duplicated: number;
+    failed: number;
+  };
 }

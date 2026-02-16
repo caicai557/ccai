@@ -6,10 +6,12 @@ import { asyncHandler, AppError } from '../../middleware/errorHandler';
 import { TargetDao } from '../../database/dao/TargetDao';
 import { getDatabase } from '../../database/init';
 import { logger } from '../../utils/logger';
+import { TargetDiscoveryService } from '../../services/target/TargetDiscoveryService';
 
 const router: Router = Router();
 const db = getDatabase();
 const targetDao = new TargetDao(db);
+const targetDiscoveryService = new TargetDiscoveryService(targetDao);
 
 /**
  * POST /api/targets
@@ -18,7 +20,7 @@ const targetDao = new TargetDao(db);
 router.post(
   '/',
   asyncHandler(async (req: Request, res: Response) => {
-    const { type, telegramId, title } = req.body;
+    const { type, telegramId, title, inviteLink } = req.body;
 
     if (!type || !telegramId || !title) {
       throw new AppError(400, '缺少必需参数');
@@ -30,10 +32,16 @@ router.post(
 
     logger.info(`添加目标: ${title} (${type})`);
 
+    const duplicated = targetDao.findByTelegramId(String(telegramId).trim());
+    if (duplicated) {
+      throw new AppError(409, '目标已存在');
+    }
+
     const target = targetDao.create({
       type,
-      telegramId,
-      title,
+      telegramId: String(telegramId).trim(),
+      inviteLink,
+      title: String(title).trim(),
       enabled: true,
     });
 
@@ -82,6 +90,67 @@ router.get(
 );
 
 /**
+ * GET /api/targets/search
+ * 按关键词搜索账号可访问群组/频道
+ */
+router.get(
+  '/search',
+  asyncHandler(async (req: Request, res: Response) => {
+    const accountId = String(req.query['accountId'] || '').trim();
+    const keyword = String(req.query['keyword'] || '').trim();
+    const limit = Number(req.query['limit'] || 50);
+
+    if (!accountId) {
+      throw new AppError(400, 'accountId 不能为空');
+    }
+
+    let results;
+    try {
+      results = await targetDiscoveryService.searchByKeyword(accountId, keyword, limit);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '搜索目标失败';
+      throw new AppError(400, message);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        items: results,
+        total: results.length,
+      },
+    });
+  })
+);
+
+/**
+ * POST /api/targets/batch-add
+ * 批量添加目标
+ */
+router.post(
+  '/batch-add',
+  asyncHandler(async (req: Request, res: Response) => {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length === 0) {
+      throw new AppError(400, 'items 不能为空');
+    }
+
+    const result = targetDiscoveryService.batchAddTargets(items);
+
+    res.json({
+      success: true,
+      data: {
+        ...result,
+        summary: {
+          created: result.created.length,
+          duplicated: result.duplicated.length,
+          failed: result.failed.length,
+        },
+      },
+    });
+  })
+);
+
+/**
  * GET /api/targets/:id
  * 获取目标详情
  */
@@ -119,7 +188,7 @@ router.put(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { title, enabled } = req.body;
+    const { title, enabled, inviteLink } = req.body;
 
     if (!id) {
       throw new AppError(400, '目标ID不能为空');
@@ -134,6 +203,7 @@ router.put(
 
     const target = targetDao.update(id, {
       title,
+      inviteLink,
       enabled,
     });
 

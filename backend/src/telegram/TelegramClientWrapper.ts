@@ -4,6 +4,14 @@ import { Api } from 'telegram/tl';
 import { getTelegramConfig } from '../config';
 import { logger } from '../utils/logger';
 import { SessionManager } from './SessionManager';
+import {
+  TargetMembershipResult,
+  TargetOperationResult,
+  TargetPermissionResult,
+  TargetResolutionResult,
+} from '../types/targetAccess';
+import { DiscoveredTarget } from '../types/target';
+import { TargetAccessErrorCode } from '../types/task';
 
 /**
  * 重连配置接口
@@ -507,6 +515,47 @@ export class TelegramClientWrapper {
   }
 
   /**
+   * 搜索当前账号可见的群组/频道
+   */
+  async searchTargets(keyword: string, limit: number = 50): Promise<DiscoveredTarget[]> {
+    await this.connect();
+
+    const normalizedKeyword = keyword.trim().toLowerCase();
+    const maxLimit = Math.min(Math.max(limit, 1), 200);
+
+    const dialogs = await this.client.getDialogs({ limit: 300 });
+    const discovered: DiscoveredTarget[] = [];
+
+    for (const dialog of dialogs) {
+      const entity = dialog.entity;
+      if (!(entity instanceof Api.Channel || entity instanceof Api.Chat)) {
+        continue;
+      }
+
+      const mapped = this.mapEntityToDiscoveredTarget(entity);
+      if (!mapped) {
+        continue;
+      }
+
+      if (!normalizedKeyword) {
+        discovered.push(mapped);
+      } else {
+        const haystack =
+          `${mapped.title} ${mapped.telegramId} ${mapped.username || ''}`.toLowerCase();
+        if (haystack.includes(normalizedKeyword)) {
+          discovered.push(mapped);
+        }
+      }
+
+      if (discovered.length >= maxLimit) {
+        break;
+      }
+    }
+
+    return discovered;
+  }
+
+  /**
    * 发送消息到群组
    */
   async sendMessage(chatId: string | number, message: string): Promise<Api.Message> {
@@ -533,15 +582,38 @@ export class TelegramClientWrapper {
     await this.connect();
 
     try {
-      const result = await this.client.invoke(
-        new Api.messages.SendMessage({
-          peer: channelId,
-          message: comment,
-          replyTo: new Api.InputReplyToMessage({ replyToMsgId: messageId }),
+      // 正确的频道评论链路：
+      // 1) 先拿到频道消息对应的讨论组消息
+      // 2) 在讨论组消息下回复
+      const channelPeer = await this.client.getInputEntity(
+        this.normalizeChannelEntityLike(channelId)
+      );
+
+      const discussion = await this.client.invoke(
+        new Api.messages.GetDiscussionMessage({
+          peer: channelPeer,
+          msgId: messageId,
         })
       );
 
-      logger.info(`评论已发送到频道 ${channelId} 的消息 ${messageId}`);
+      const discussionAnchor = discussion.messages.find(
+        (msg): msg is Api.Message => msg instanceof Api.Message
+      );
+
+      if (!discussionAnchor || !discussionAnchor.peerId) {
+        throw new Error('频道未开启评论或无法定位讨论组消息');
+      }
+
+      const discussionPeer = await this.client.getInputEntity(discussionAnchor.peerId);
+      const result = await this.client.invoke(
+        new Api.messages.SendMessage({
+          peer: discussionPeer,
+          message: comment,
+          replyTo: new Api.InputReplyToMessage({ replyToMsgId: discussionAnchor.id }),
+        })
+      );
+
+      logger.info(`评论已发送到频道 ${channelId} 的消息 ${messageId}（讨论组回复）`);
       return result as unknown as Api.Message;
     } catch (error) {
       logger.error(`发送评论失败:`, error);
@@ -555,6 +627,242 @@ export class TelegramClientWrapper {
   async getEntity(entityId: string | number): Promise<Api.TypeEntityLike> {
     await this.connect();
     return await this.client.getEntity(entityId);
+  }
+
+  /**
+   * 解析目标实体（用于预检）
+   */
+  async resolveTarget(targetId: string | number): Promise<TargetResolutionResult> {
+    await this.connect();
+
+    try {
+      const entity = await this.client.getEntity(targetId);
+      const telegramId = String(targetId);
+      const normalized = this.getNormalizedPeerInfo(entity);
+
+      return {
+        success: true,
+        telegramId,
+        normalizedPeerId: normalized.normalizedPeerId,
+        peerType: normalized.peerType,
+      };
+    } catch (error) {
+      const parsedError = this.parseTargetAccessError(error);
+      return {
+        success: false,
+        telegramId: String(targetId),
+        code: parsedError.code,
+        message: parsedError.message,
+      };
+    }
+  }
+
+  /**
+   * 检查是否已加入目标
+   */
+  async checkMembership(targetId: string | number): Promise<TargetMembershipResult> {
+    await this.connect();
+
+    try {
+      const inputPeer = await this.client.getInputEntity(targetId);
+      const inputChannel = this.toInputChannel(inputPeer);
+
+      // 非频道类目标，只要能解析实体即视为可访问
+      if (!inputChannel) {
+        return { success: true, isMember: true };
+      }
+
+      await this.client.invoke(
+        new Api.channels.GetParticipant({
+          channel: inputChannel,
+          participant: new Api.InputPeerSelf(),
+        })
+      );
+
+      return { success: true, isMember: true };
+    } catch (error) {
+      const parsedError = this.parseTargetAccessError(error);
+
+      if (parsedError.code === 'TARGET_NOT_JOINED') {
+        return {
+          success: true,
+          isMember: false,
+          code: parsedError.code,
+          message: parsedError.message,
+        };
+      }
+
+      return {
+        success: false,
+        isMember: false,
+        code: parsedError.code,
+        message: parsedError.message,
+      };
+    }
+  }
+
+  /**
+   * 检查是否有写权限
+   */
+  async checkWritePermission(targetId: string | number): Promise<TargetPermissionResult> {
+    await this.connect();
+
+    try {
+      const membership = await this.checkMembership(targetId);
+      if (!membership.success) {
+        return {
+          success: false,
+          canWrite: false,
+          code: membership.code,
+          message: membership.message,
+        };
+      }
+
+      if (!membership.isMember) {
+        return {
+          success: true,
+          canWrite: false,
+          code: 'TARGET_NOT_JOINED',
+          message: '账号尚未加入目标',
+        };
+      }
+
+      const entity = await this.client.getEntity(targetId);
+      const inputPeer = await this.client.getInputEntity(targetId);
+      const inputChannel = this.toInputChannel(inputPeer);
+
+      if (!inputChannel) {
+        return { success: true, canWrite: true };
+      }
+
+      const participantResult = await this.client.invoke(
+        new Api.channels.GetParticipant({
+          channel: inputChannel,
+          participant: new Api.InputPeerSelf(),
+        })
+      );
+
+      const participant = participantResult.participant;
+
+      // 禁言用户
+      if (participant instanceof Api.ChannelParticipantBanned) {
+        return {
+          success: true,
+          canWrite: false,
+          code: 'TARGET_WRITE_FORBIDDEN',
+          message: '账号在目标中被限制发言',
+        };
+      }
+
+      // 已离开
+      if (participant instanceof Api.ChannelParticipantLeft) {
+        return {
+          success: true,
+          canWrite: false,
+          code: 'TARGET_NOT_JOINED',
+          message: '账号尚未加入目标',
+        };
+      }
+
+      // 广播频道仅管理员可发言
+      if (entity instanceof Api.Channel && Boolean(entity.broadcast) && !entity.megagroup) {
+        const isManager =
+          participant instanceof Api.ChannelParticipantCreator ||
+          participant instanceof Api.ChannelParticipantAdmin;
+
+        if (!isManager) {
+          return {
+            success: true,
+            canWrite: false,
+            code: 'TARGET_WRITE_FORBIDDEN',
+            message: '账号在频道中没有发言权限',
+          };
+        }
+      }
+
+      return { success: true, canWrite: true };
+    } catch (error) {
+      const parsedError = this.parseTargetAccessError(error);
+      return {
+        success: false,
+        canWrite: false,
+        code: parsedError.code,
+        message: parsedError.message,
+      };
+    }
+  }
+
+  /**
+   * 加入公开目标（用户名/公开频道）
+   */
+  async joinPublicTarget(targetId: string | number): Promise<TargetOperationResult> {
+    await this.connect();
+
+    try {
+      const inputPeer = await this.client.getInputEntity(targetId);
+      const inputChannel = this.toInputChannel(inputPeer);
+      if (!inputChannel) {
+        return {
+          success: false,
+          code: 'TARGET_ACCESS_DENIED',
+          message: '目标不是可加入的频道或群组',
+        };
+      }
+
+      await this.client.invoke(
+        new Api.channels.JoinChannel({
+          channel: inputChannel,
+        })
+      );
+
+      return { success: true };
+    } catch (error) {
+      const parsedError = this.parseTargetAccessError(error);
+
+      // 已在目标中视为成功
+      if (parsedError.code === 'TARGET_NOT_JOINED' && parsedError.message.includes('已加入')) {
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        code: parsedError.code,
+        message: parsedError.message,
+      };
+    }
+  }
+
+  /**
+   * 通过邀请链接加入私有目标
+   */
+  async joinByInviteLink(inviteLinkOrHash: string): Promise<TargetOperationResult> {
+    await this.connect();
+
+    try {
+      const hash = this.extractInviteHash(inviteLinkOrHash);
+      if (!hash) {
+        return {
+          success: false,
+          code: 'TARGET_PRIVATE_NO_INVITE',
+          message: '邀请链接格式无效',
+        };
+      }
+
+      await this.client.invoke(
+        new Api.messages.ImportChatInvite({
+          hash,
+        })
+      );
+
+      return { success: true };
+    } catch (error) {
+      const parsedError = this.parseTargetAccessError(error);
+      return {
+        success: false,
+        code: parsedError.code,
+        message: parsedError.message,
+      };
+    }
   }
 
   /**
@@ -595,5 +903,195 @@ export class TelegramClientWrapper {
    */
   getIsConnected(): boolean {
     return this.isConnected;
+  }
+
+  private mapEntityToDiscoveredTarget(entity: Api.Channel | Api.Chat): DiscoveredTarget | null {
+    const title = entity.title?.trim();
+    if (!title) {
+      return null;
+    }
+
+    if (entity instanceof Api.Channel) {
+      return {
+        type: entity.megagroup ? 'group' : 'channel',
+        telegramId: entity.id.toString(),
+        title,
+        username: entity.username || undefined,
+      };
+    }
+
+    return {
+      type: 'group',
+      telegramId: entity.id.toString(),
+      title,
+    };
+  }
+
+  private toInputChannel(inputPeer: Api.TypeInputPeer): Api.InputChannel | null {
+    if (!(inputPeer instanceof Api.InputPeerChannel)) {
+      return null;
+    }
+
+    return new Api.InputChannel({
+      channelId: inputPeer.channelId,
+      accessHash: inputPeer.accessHash,
+    });
+  }
+
+  private getNormalizedPeerInfo(entity: Api.TypeEntityLike): {
+    normalizedPeerId?: string;
+    peerType: 'channel' | 'group' | 'user' | 'unknown';
+  } {
+    if (entity instanceof Api.Channel) {
+      return {
+        normalizedPeerId: entity.id.toString(),
+        peerType: entity.megagroup ? 'group' : 'channel',
+      };
+    }
+
+    if (entity instanceof Api.Chat) {
+      return {
+        normalizedPeerId: entity.id.toString(),
+        peerType: 'group',
+      };
+    }
+
+    if (entity instanceof Api.User) {
+      return {
+        normalizedPeerId: entity.id.toString(),
+        peerType: 'user',
+      };
+    }
+
+    return {
+      peerType: 'unknown',
+    };
+  }
+
+  private parseTargetAccessError(error: unknown): { code: TargetAccessErrorCode; message: string } {
+    const errorMessage = this.extractTelegramErrorMessage(error);
+
+    if (errorMessage.includes('USER_NOT_PARTICIPANT')) {
+      return {
+        code: 'TARGET_NOT_JOINED',
+        message: '账号尚未加入目标',
+      };
+    }
+
+    if (
+      errorMessage.includes('CHAT_WRITE_FORBIDDEN') ||
+      errorMessage.includes('USER_BANNED_IN_CHANNEL') ||
+      errorMessage.includes('CHAT_ADMIN_REQUIRED')
+    ) {
+      return {
+        code: 'TARGET_WRITE_FORBIDDEN',
+        message: '账号没有发言权限',
+      };
+    }
+
+    if (errorMessage.includes('INVITE_REQUEST_SENT')) {
+      return {
+        code: 'TARGET_JOIN_PENDING',
+        message: '已提交加入申请，等待管理员审核',
+      };
+    }
+
+    if (
+      errorMessage.includes('INVITE_HASH_INVALID') ||
+      errorMessage.includes('INVITE_HASH_EXPIRED') ||
+      errorMessage.includes('CHANNEL_PRIVATE')
+    ) {
+      return {
+        code: 'TARGET_PRIVATE_NO_INVITE',
+        message: '私有目标需要有效邀请链接',
+      };
+    }
+
+    if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
+      return {
+        code: 'TARGET_NOT_JOINED',
+        message: '账号已加入目标',
+      };
+    }
+
+    if (
+      errorMessage.includes('CHANNEL_INVALID') ||
+      errorMessage.includes('PEER_ID_INVALID') ||
+      errorMessage.includes('USERNAME_INVALID') ||
+      errorMessage.includes('USERNAME_NOT_OCCUPIED')
+    ) {
+      return {
+        code: 'TARGET_ACCESS_DENIED',
+        message: '目标不存在或不可访问',
+      };
+    }
+
+    if (errorMessage.includes('FLOOD_WAIT')) {
+      return {
+        code: 'TARGET_JOIN_FAILED',
+        message: '操作过于频繁，请稍后再试',
+      };
+    }
+
+    return {
+      code: 'UNKNOWN_ERROR',
+      message: errorMessage || '未知错误',
+    };
+  }
+
+  private extractTelegramErrorMessage(error: unknown): string {
+    if (error && typeof error === 'object') {
+      const errorLike = error as {
+        errorMessage?: string;
+        message?: string;
+      };
+      return errorLike.errorMessage || errorLike.message || '';
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    return '';
+  }
+
+  private extractInviteHash(inviteLinkOrHash: string): string | null {
+    const trimmed = inviteLinkOrHash.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const hashOnlyPattern = /^[A-Za-z0-9_-]{10,}$/;
+    if (hashOnlyPattern.test(trimmed)) {
+      return trimmed;
+    }
+
+    const matched =
+      trimmed.match(/(?:https?:\/\/)?t\.me\/\+([A-Za-z0-9_-]+)/i) ||
+      trimmed.match(/(?:https?:\/\/)?t\.me\/joinchat\/([A-Za-z0-9_-]+)/i);
+
+    return matched?.[1] || null;
+  }
+
+  private normalizeChannelEntityLike(channelId: string | number): string | number {
+    if (typeof channelId === 'number') {
+      return `-100${Math.abs(channelId)}`;
+    }
+
+    const raw = channelId.trim();
+    if (!raw) {
+      return channelId;
+    }
+
+    if (/^-100\d+$/.test(raw)) {
+      return raw;
+    }
+
+    if (/^-?\d+$/.test(raw)) {
+      const numeric = raw.replace(/^-100/, '').replace(/^-/, '');
+      return `-100${numeric}`;
+    }
+
+    return channelId;
   }
 }
