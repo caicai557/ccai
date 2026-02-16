@@ -51,6 +51,16 @@ backend (3000)
 
 ## 安装步骤
 
+> 建议使用 Node.js **22 LTS**（或当前可用 LTS 版本）。
+>
+> `better-sqlite3` 是原生模块，切换 Node 大版本后若出现 ABI 不匹配（`NODE_MODULE_VERSION`）错误，可执行：
+>
+> ```bash
+> pnpm --filter @telegram-manager/backend run native:ensure
+> ```
+>
+> 后端已在 `postinstall` / `pretest` 自动执行该检查与自修复（自动 `pnpm rebuild better-sqlite3`）。
+
 1. 安装依赖
 
 ```bash

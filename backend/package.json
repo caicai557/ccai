@@ -11,6 +11,9 @@
     "clean": "rm -rf dist",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "native:ensure": "node scripts/ensure-native.js",
+    "postinstall": "pnpm run native:ensure",
+    "pretest": "pnpm run native:ensure",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"

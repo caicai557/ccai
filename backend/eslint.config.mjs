@@ -60,6 +60,7 @@ export default [
       '**/*.property.test.ts',
       'src/services/config/example.ts',
       'src/telegram/ClientPoolExample.ts',
+      'scripts/**',
     ],
   },
 ];
