@@ -4,4 +4,6 @@ export * from './target';
 export * from './template';
 export * from './message';
 export * from './task';
+export * from './targetAccess';
 export * from './common';
+export * from './discovery';

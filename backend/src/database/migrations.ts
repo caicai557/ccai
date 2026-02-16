@@ -146,6 +146,75 @@ const migrations: Migration[] = [
       logger.warn('SQLite 不支持 DROP COLUMN，回滚需要手动处理');
     },
   },
+  {
+    version: '006',
+    name: 'add_target_invite_link',
+    up: (db: Database.Database) => {
+      if (hasColumn(db, 'targets', 'invite_link')) {
+        logger.info('跳过 targets.invite_link 字段（已存在）');
+        return;
+      }
+
+      db.exec(`
+        ALTER TABLE targets ADD COLUMN invite_link TEXT
+      `);
+      logger.info('✅ 添加 targets.invite_link 字段');
+    },
+    down: (_db: Database.Database) => {
+      // SQLite 不支持 DROP COLUMN，需要重建表
+      logger.warn('SQLite 不支持 DROP COLUMN，回滚需要手动处理');
+    },
+  },
+  {
+    version: '007',
+    name: 'create_discovery_candidates',
+    up: (db: Database.Database) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS discovery_candidates (
+          id TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('group', 'channel')),
+          title TEXT NOT NULL,
+          username TEXT,
+          invite_link TEXT,
+          telegram_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          region_hint TEXT,
+          description TEXT,
+          recent_message_summary TEXT,
+          rules_score REAL NOT NULL DEFAULT 0,
+          ai_score REAL,
+          final_score REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
+          reason TEXT,
+          reachability_status TEXT NOT NULL DEFAULT 'unknown' CHECK(reachability_status IN ('reachable', 'unreachable', 'unknown')),
+          ai_provider TEXT,
+          ai_model TEXT,
+          ai_raw TEXT,
+          trace_id TEXT NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status
+        ON discovery_candidates(status)
+      `);
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_trace_id
+        ON discovery_candidates(trace_id)
+      `);
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_telegram_id
+        ON discovery_candidates(telegram_id)
+      `);
+
+      logger.info('✅ 创建 discovery_candidates 表');
+    },
+  },
 ];
 
 /**

@@ -6,6 +6,7 @@ import { RateLimitDao } from './RateLimitDao';
 import { MessageHistoryDao } from './MessageHistoryDao';
 import { LogDao } from './LogDao';
 import { ConfigDao } from './ConfigDao';
+import { DiscoveryCandidateDao } from './DiscoveryCandidateDao';
 
 /**
  * DAO工厂类
@@ -21,6 +22,7 @@ export class DaoFactory {
   private messageHistoryDao?: MessageHistoryDao;
   private logDao?: LogDao;
   private configDao?: ConfigDao;
+  private discoveryCandidateDao?: DiscoveryCandidateDao;
 
   private constructor(db: Database.Database) {
     this.db = db;
@@ -88,6 +90,22 @@ export class DaoFactory {
     }
     return this.configDao;
   }
+
+  getDiscoveryCandidateDao(): DiscoveryCandidateDao {
+    if (!this.discoveryCandidateDao) {
+      this.discoveryCandidateDao = new DiscoveryCandidateDao(this.db);
+    }
+    return this.discoveryCandidateDao;
+  }
 }
 
-export { AccountDao, TargetDao, TemplateDao, RateLimitDao, MessageHistoryDao, LogDao, ConfigDao };
+export {
+  AccountDao,
+  TargetDao,
+  TemplateDao,
+  RateLimitDao,
+  MessageHistoryDao,
+  LogDao,
+  ConfigDao,
+  DiscoveryCandidateDao,
+};

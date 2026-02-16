@@ -34,6 +34,7 @@ export const createTables = (db: Database.Database): void => {
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL CHECK(type IN ('group', 'channel')),
       telegram_id TEXT NOT NULL,
+      invite_link TEXT,
       title TEXT NOT NULL,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -154,6 +155,36 @@ export const createTables = (db: Database.Database): void => {
   `);
   logger.info('✅ 创建表: logs');
 
+  // 智能发现候选表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS discovery_candidates (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('group', 'channel')),
+      title TEXT NOT NULL,
+      username TEXT,
+      invite_link TEXT,
+      telegram_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      region_hint TEXT,
+      description TEXT,
+      recent_message_summary TEXT,
+      rules_score REAL NOT NULL DEFAULT 0,
+      ai_score REAL,
+      final_score REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
+      reason TEXT,
+      reachability_status TEXT NOT NULL DEFAULT 'unknown' CHECK(reachability_status IN ('reachable', 'unreachable', 'unknown')),
+      ai_provider TEXT,
+      ai_model TEXT,
+      ai_raw TEXT,
+      trace_id TEXT NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  logger.info('✅ 创建表: discovery_candidates');
+
   logger.info('✅ 所有数据库表创建完成');
 };
 
@@ -220,6 +251,21 @@ export const createIndexes = (db: Database.Database): void => {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_logs_task_id 
     ON logs(task_id)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status
+    ON discovery_candidates(status)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_candidates_trace_id
+    ON discovery_candidates(trace_id)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_candidates_telegram_id
+    ON discovery_candidates(telegram_id)
   `);
 
   logger.info('✅ 所有索引创建完成');

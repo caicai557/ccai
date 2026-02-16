@@ -47,12 +47,21 @@ export interface RateLimitConfig {
 /**
  * 应用配置
  */
+export interface DiscoveryConfig {
+  enabled: boolean;
+  geminiEnabled: boolean;
+  geminiApiKey?: string;
+  geminiModel: string;
+  requestTimeoutMs: number;
+}
+
 export interface AppConfig {
   server: ServerConfig;
   telegram: TelegramConfig;
   database: DatabaseConfig;
   security: SecurityConfig;
   rateLimit: RateLimitConfig;
+  discovery: DiscoveryConfig;
 }
 
 /**
@@ -72,11 +81,27 @@ export const getTelegramConfig = (): TelegramConfig => {
   const apiId = process.env['TELEGRAM_API_ID'] || config.get<string>('telegram.apiId');
   const apiHash = process.env['TELEGRAM_API_HASH'] || config.get<string>('telegram.apiHash');
 
-  if (!apiId || !apiHash) {
-    throw new Error('Telegram API配置缺失，请在.env文件中配置TELEGRAM_API_ID和TELEGRAM_API_HASH');
+  const normalizedApiId = apiId?.trim();
+  const normalizedApiHash = apiHash?.trim();
+  const placeholderApiIds = new Set(['your_api_id', 'api_id']);
+  const placeholderApiHashes = new Set(['your_api_hash', 'api_hash']);
+
+  if (
+    !normalizedApiId ||
+    !normalizedApiHash ||
+    placeholderApiIds.has(normalizedApiId.toLowerCase()) ||
+    placeholderApiHashes.has(normalizedApiHash.toLowerCase())
+  ) {
+    throw new Error(
+      'Telegram API配置缺失，请在backend/.env中填写真实的TELEGRAM_API_ID和TELEGRAM_API_HASH'
+    );
   }
 
-  return { apiId, apiHash };
+  if (!/^\d+$/.test(normalizedApiId)) {
+    throw new Error('TELEGRAM_API_ID格式无效，必须是纯数字');
+  }
+
+  return { apiId: normalizedApiId, apiHash: normalizedApiHash };
 };
 
 /**
@@ -118,6 +143,16 @@ export const getRateLimitConfig = (): RateLimitConfig => {
   };
 };
 
+export const getDiscoveryConfig = (): DiscoveryConfig => {
+  return {
+    enabled: process.env['DISCOVERY_ENABLED'] !== 'false',
+    geminiEnabled: process.env['DISCOVERY_GEMINI_ENABLED'] !== 'false',
+    geminiApiKey: process.env['GEMINI_API_KEY']?.trim(),
+    geminiModel: process.env['GEMINI_MODEL']?.trim() || 'gemini-2.0-flash',
+    requestTimeoutMs: Number(process.env['GEMINI_TIMEOUT_MS'] || 8000),
+  };
+};
+
 /**
  * 获取完整应用配置
  */
@@ -128,6 +163,7 @@ export const getAppConfig = (): AppConfig => {
     database: getDatabaseConfig(),
     security: getSecurityConfig(),
     rateLimit: getRateLimitConfig(),
+    discovery: getDiscoveryConfig(),
   };
 };
 
