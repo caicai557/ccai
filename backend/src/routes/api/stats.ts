@@ -9,6 +9,7 @@ import { AccountDao } from '../../database/dao/AccountDao';
 import { TaskDao } from '../../database/dao/TaskDao';
 import { TaskExecutionDao, TaskExecution } from '../../database/dao/TaskExecutionDao';
 import { LogDao } from '../../database/dao/LogDao';
+import { TargetDao } from '../../database/dao/TargetDao';
 
 const router: Router = Router();
 const db = getDatabase();
@@ -16,6 +17,7 @@ const accountDao = new AccountDao(db);
 const taskDao = new TaskDao(db);
 const taskExecutionDao = new TaskExecutionDao(db);
 const logDao = new LogDao(db);
+const targetDao = new TargetDao(db);
 
 /**
  * GET /api/stats/dashboard
@@ -37,16 +39,20 @@ router.get(
     const runningTasks = tasks.filter((t) => t.status === 'running').length;
     const stoppedTasks = tasks.filter((t) => t.status === 'stopped').length;
 
-    // 执行统计（最近7天）
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recentExecutions = taskExecutionDao.findRecent(10000).filter((e) => {
-      return new Date(e.executedAt) >= sevenDaysAgo;
+    // 目标统计
+    const targets = targetDao.findAll();
+    const activeTargets = targets.filter((target) => target.enabled).length;
+
+    // 执行统计（今日）
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayExecutions = taskExecutionDao.findRecent(10000).filter((e) => {
+      return new Date(e.executedAt) >= startOfToday;
     });
 
-    const totalExecutions = recentExecutions.length;
-    const successfulExecutions = recentExecutions.filter((e) => e.success).length;
-    const failedExecutions = recentExecutions.filter((e) => !e.success).length;
+    const totalExecutions = todayExecutions.length;
+    const successfulExecutions = todayExecutions.filter((e) => e.success).length;
+    const failedExecutions = todayExecutions.filter((e) => !e.success).length;
     const successRate =
       totalExecutions > 0 ? ((successfulExecutions / totalExecutions) * 100).toFixed(2) : '0';
 
@@ -72,6 +78,10 @@ router.get(
           total: tasks.length,
           running: runningTasks,
           stopped: stoppedTasks,
+        },
+        targets: {
+          total: targets.length,
+          active: activeTargets,
         },
         executions: {
           total: totalExecutions,

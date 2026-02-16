@@ -18,6 +18,7 @@ import { WsMessageType } from '../../services/websocket/client';
 import type { Task } from '../../types/task';
 import { PageHeader } from '../../components/Layout';
 import { TaskForm, TaskHistoryModal } from '../../components/Task';
+import { showError } from '../../utils/notification';
 
 /**
  * 任务列表页面
@@ -55,7 +56,7 @@ const TaskList: React.FC = () => {
       const data = await tasksApi.getAll();
       setTasks(data);
     } catch (error) {
-      message.error('加载任务列表失败');
+      showError('加载任务列表失败');
       console.error('Failed to load tasks:', error);
     } finally {
       setLoading(false);
@@ -74,11 +75,25 @@ const TaskList: React.FC = () => {
   const handleStart = async (taskId: string) => {
     try {
       setOperatingTaskId(taskId);
-      await tasksApi.start(taskId);
+      const startResult = await tasksApi.start(taskId);
       updateTask(taskId, { status: 'running' });
-      message.success('任务启动成功');
+
+      const readyCount = startResult.precheck.readyPairs.length;
+      const blockedCount = startResult.precheck.blockedPairs.length;
+      const reasonText = Object.entries(startResult.precheck.blockedReasons || {})
+        .map(([code, count]) => `${code}(${count})`)
+        .join('、');
+
+      if (blockedCount > 0) {
+        message.warning(
+          `任务已启动（部分可用）：可用${readyCount}，阻塞${blockedCount}${reasonText ? `，原因：${reasonText}` : ''}`
+        );
+      } else {
+        message.success(startResult.message || '任务启动成功');
+      }
     } catch (error) {
-      message.error('启动任务失败');
+      const errorMessage = error instanceof Error ? error.message : '启动任务失败';
+      message.error(errorMessage || '启动任务失败');
       console.error('Failed to start task:', error);
     } finally {
       setOperatingTaskId(null);
@@ -100,13 +115,13 @@ const TaskList: React.FC = () => {
     }
   };
 
-  // 暂停任务
+  // 暂停任务（后端语义等同停止）
   const handlePause = async (taskId: string) => {
     try {
       setOperatingTaskId(taskId);
       await tasksApi.pause(taskId);
-      updateTask(taskId, { status: 'paused' });
-      message.success('任务暂停成功');
+      updateTask(taskId, { status: 'stopped' });
+      message.success('任务已暂停（状态已置为停止）');
     } catch (error) {
       message.error('暂停任务失败');
       console.error('Failed to pause task:', error);
@@ -192,14 +207,6 @@ const TaskList: React.FC = () => {
       stopped: {
         color: 'default',
         text: '已停止',
-      },
-      paused: {
-        color: 'warning',
-        text: '已暂停',
-      },
-      error: {
-        color: 'error',
-        text: '错误',
       },
     };
 
@@ -326,33 +333,6 @@ const TaskList: React.FC = () => {
                     loading={isOperating}
                   >
                     暂停
-                  </Button>
-                </Tooltip>
-                <Tooltip title="停止任务">
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<StopOutlined />}
-                    onClick={() => handleStop(record.id)}
-                    loading={isOperating}
-                  >
-                    停止
-                  </Button>
-                </Tooltip>
-              </>
-            )}
-
-            {record.status === 'paused' && (
-              <>
-                <Tooltip title="继续运行">
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<PlayCircleOutlined />}
-                    onClick={() => handleStart(record.id)}
-                    loading={isOperating}
-                  >
-                    继续
                   </Button>
                 </Tooltip>
                 <Tooltip title="停止任务">

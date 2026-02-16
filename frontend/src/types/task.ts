@@ -1,4 +1,17 @@
 // 任务相关类型定义
+export type PrecheckPolicy = 'partial' | 'strict';
+
+export type TargetAccessErrorCode =
+  | 'TARGET_NOT_JOINED'
+  | 'TARGET_JOIN_PENDING'
+  | 'TARGET_PRIVATE_NO_INVITE'
+  | 'TARGET_WRITE_FORBIDDEN'
+  | 'TARGET_ACCESS_DENIED'
+  | 'TARGET_JOIN_COOLDOWN'
+  | 'TARGET_JOIN_FAILED'
+  | 'CLIENT_NOT_READY'
+  | 'UNKNOWN_ERROR';
+
 export interface Task {
   id: string;
   name: string;
@@ -8,7 +21,7 @@ export interface Task {
   targetType: 'group' | 'channel';
   templateId: string;
   config: TaskConfig;
-  status: 'stopped' | 'running' | 'paused' | 'error';
+  status: 'stopped' | 'running';
   priority: number; // 优先级（1-10）
   createdAt: Date;
   lastExecutedAt?: Date;
@@ -25,6 +38,8 @@ export interface TaskConfig {
   maxDelay?: number; // 最大延迟（秒）
   retryOnError?: boolean; // 失败时是否重试
   maxRetries?: number; // 最大重试次数
+  autoJoinEnabled?: boolean; // 是否启用自动加入目标
+  precheckPolicy?: PrecheckPolicy; // 预检失败策略
 }
 
 export interface CreateTaskRequest {
@@ -48,6 +63,34 @@ export interface TaskUpdate {
   status: string;
   nextExecutionAt?: string;
   lastResult?: any;
+}
+
+export interface TaskReadyPair {
+  accountId: string;
+  targetId: string;
+  telegramId: string;
+}
+
+export interface TaskBlockedPair {
+  accountId: string;
+  targetId: string;
+  telegramId: string;
+  code: TargetAccessErrorCode;
+  message: string;
+  autoJoinAttempted: boolean;
+}
+
+export interface TaskPrecheckSummary {
+  policy: PrecheckPolicy;
+  autoJoinEnabled: boolean;
+  readyPairs: TaskReadyPair[];
+  blockedPairs: TaskBlockedPair[];
+  blockedReasons: Record<string, number>;
+}
+
+export interface TaskStartResult {
+  message: string;
+  precheck: TaskPrecheckSummary;
 }
 
 export interface TaskExecution {

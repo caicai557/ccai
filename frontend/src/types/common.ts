@@ -15,7 +15,7 @@ export interface PaginatedResponse<T> {
 }
 
 export interface LogMessage {
-  level: 'info' | 'warn' | 'error';
+  level: 'info' | 'warn' | 'error' | 'debug';
   timestamp: string;
   accountId?: string;
   message: string;
@@ -36,6 +36,7 @@ export interface DashboardStats {
   onlineAccounts: number;
   totalTargets: number;
   activeTargets: number;
+  totalTasks: number;
   runningTasks: number;
   todayMessages: number;
   todaySuccessRate: number;

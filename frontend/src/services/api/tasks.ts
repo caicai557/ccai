@@ -1,5 +1,5 @@
 import { get, post, put, del } from './client';
-import type { Task } from '../../types/task';
+import type { Task, TaskConfig, TaskPrecheckSummary, TaskStartResult } from '../../types/task';
 
 /**
  * 任务执行历史
@@ -25,6 +25,8 @@ interface BackendTask {
     commentProbability?: number;
     retryOnError?: boolean;
     maxRetries?: number;
+    autoJoinEnabled?: boolean;
+    precheckPolicy?: 'partial' | 'strict';
     [key: string]: any;
   };
   status: 'running' | 'stopped';
@@ -62,6 +64,8 @@ const toFrontendTask = (task: BackendTask, stats?: BackendTaskStats): Task => {
       maxDelay: task.config?.randomDelay,
       retryOnError: task.config?.retryOnError,
       maxRetries: task.config?.maxRetries,
+      autoJoinEnabled: task.config?.autoJoinEnabled,
+      precheckPolicy: task.config?.precheckPolicy,
     },
     status: task.status,
     priority: task.priority,
@@ -109,7 +113,7 @@ export const tasksApi = {
     targetId: string;
     targetType: 'group' | 'channel';
     templateId: string;
-    config: any;
+    config: TaskConfig;
     priority?: number;
   }): Promise<Task> => {
     const payload = {
@@ -124,6 +128,8 @@ export const tasksApi = {
         randomDelay: data.config?.maxDelay ?? data.config?.minDelay ?? 1,
         retryOnError: data.config?.retryOnError,
         maxRetries: data.config?.maxRetries,
+        autoJoinEnabled: data.config?.autoJoinEnabled ?? true,
+        precheckPolicy: data.config?.precheckPolicy ?? 'partial',
         name: data.name,
         targetType: data.targetType,
         templateId: data.templateId,
@@ -138,13 +144,18 @@ export const tasksApi = {
   /**
    * 更新任务
    */
-  update: (id: string, data: { config?: any; priority?: number }): Promise<Task> => {
+  update: (
+    id: string,
+    data: { config?: Partial<TaskConfig>; priority?: number }
+  ): Promise<Task> => {
     const payload = {
       priority: data.priority,
       config: data.config
         ? {
             ...data.config,
             randomDelay: data.config?.maxDelay ?? data.config?.minDelay,
+            autoJoinEnabled: data.config?.autoJoinEnabled,
+            precheckPolicy: data.config?.precheckPolicy,
           }
         : undefined,
     };
@@ -164,8 +175,13 @@ export const tasksApi = {
   /**
    * 启动任务
    */
-  start: (id: string): Promise<void> => {
-    return post<{ message: string }>(`/api/tasks/${id}/start`).then(() => undefined);
+  start: (id: string): Promise<TaskStartResult> => {
+    return post<{ message: string; precheck: TaskPrecheckSummary }>(`/api/tasks/${id}/start`).then(
+      (res) => ({
+        message: res.message,
+        precheck: res.precheck,
+      })
+    );
   },
 
   /**
@@ -194,10 +210,9 @@ export const tasksApi = {
   /**
    * 按状态获取任务
    */
-  getByStatus: (status: 'stopped' | 'running' | 'paused' | 'error'): Promise<Task[]> => {
-    const normalizedStatus = status === 'running' ? 'running' : 'stopped';
+  getByStatus: (status: 'stopped' | 'running'): Promise<Task[]> => {
     return get<{ tasks: BackendTask[]; total: number }>('/api/tasks', {
-      status: normalizedStatus,
+      status,
     }).then((res) => res.tasks.map((task) => toFrontendTask(task)));
   },
 };

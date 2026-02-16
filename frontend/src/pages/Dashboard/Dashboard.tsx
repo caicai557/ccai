@@ -185,8 +185,8 @@ const Dashboard: React.FC = () => {
 
   // 计算任务活跃率
   const getTaskActiveRate = () => {
-    if (!dashboardStats || dashboardStats.totalAccounts === 0) return 0;
-    return (dashboardStats.runningTasks / dashboardStats.totalAccounts) * 100;
+    if (!dashboardStats || dashboardStats.totalTasks === 0) return 0;
+    return (dashboardStats.runningTasks / dashboardStats.totalTasks) * 100;
   };
 
   if (loading && !dashboardStats) {

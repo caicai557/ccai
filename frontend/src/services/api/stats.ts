@@ -41,6 +41,7 @@ export const statsApi = {
     return get<{
       accounts: { total: number; online: number };
       tasks: { total: number; running: number };
+      targets?: { total: number; active: number };
       executions: { total: number; successful: number; failed: number };
       logs: { total: number };
     }>('/api/stats/dashboard').then((res) => {
@@ -50,8 +51,9 @@ export const statsApi = {
       return {
         totalAccounts: res.accounts.total,
         onlineAccounts: res.accounts.online,
-        totalTargets: 0,
-        activeTargets: 0,
+        totalTargets: res.targets?.total ?? 0,
+        activeTargets: res.targets?.active ?? 0,
+        totalTasks: res.tasks.total,
         runningTasks: res.tasks.running,
         todayMessages: res.executions.total,
         todaySuccessRate,
