@@ -163,6 +163,38 @@ describe('API端点集成测试', () => {
       expect(response.body.data.template).toHaveProperty('id', templateId);
     });
 
+    test('DELETE /api/templates/:id 被任务引用时应返回409', async () => {
+      const createTemplateResponse = await request(app).post('/api/templates').send({
+        category: 'group_message',
+        content: '用于引用检查',
+        weight: 1,
+      });
+
+      expect(createTemplateResponse.status).toBe(200);
+      const referencedTemplateId = createTemplateResponse.body.data.template.id;
+
+      const createTaskResponse = await request(app)
+        .post('/api/tasks')
+        .send({
+          name: '模板引用检查任务',
+          type: 'group_posting',
+          accountIds: ['mock-account-id'],
+          targetIds: ['mock-target-id'],
+          config: {
+            interval: 10,
+            templateId: referencedTemplateId,
+          },
+        });
+
+      expect(createTaskResponse.status).toBe(200);
+
+      const deleteResponse = await request(app).delete(`/api/templates/${referencedTemplateId}`);
+
+      expect(deleteResponse.status).toBe(409);
+      expect(deleteResponse.body).toHaveProperty('success', false);
+      expect(deleteResponse.body.error.message).toContain('模板正在被任务使用');
+    });
+
     test('DELETE /api/templates/:id 应该删除模板', async () => {
       const response = await request(app).delete(`/api/templates/${templateId}`);
 
@@ -180,12 +212,14 @@ describe('API端点集成测试', () => {
         type: 'group',
         telegramId: '-1001234567890',
         title: '测试群组',
+        inviteLink: 'https://t.me/+testInviteHash',
       });
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('success', true);
       expect(response.body.data).toHaveProperty('target');
       expect(response.body.data.target).toHaveProperty('id');
+      expect(response.body.data.target).toHaveProperty('inviteLink', 'https://t.me/+testInviteHash');
 
       targetId = response.body.data.target.id;
     });
@@ -205,6 +239,18 @@ describe('API端点集成测试', () => {
       expect(response.body).toHaveProperty('success', true);
       expect(response.body.data).toHaveProperty('target');
       expect(response.body.data.target).toHaveProperty('id', targetId);
+      expect(response.body.data.target).toHaveProperty('inviteLink', 'https://t.me/+testInviteHash');
+    });
+
+    test('PUT /api/targets/:id 应该更新邀请链接', async () => {
+      const response = await request(app).put(`/api/targets/${targetId}`).send({
+        inviteLink: 'https://t.me/+updatedInviteHash',
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('success', true);
+      expect(response.body.data).toHaveProperty('target');
+      expect(response.body.data.target).toHaveProperty('inviteLink', 'https://t.me/+updatedInviteHash');
     });
 
     test('DELETE /api/targets/:id 应该删除目标', async () => {
@@ -213,6 +259,35 @@ describe('API端点集成测试', () => {
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('success', true);
       expect(response.body.data).toHaveProperty('message');
+    });
+  });
+
+  describe('智能发现API', () => {
+    test('POST /api/discovery/run 缺少 accountId 应返回400', async () => {
+      const response = await request(app).post('/api/discovery/run').send({
+        keywords: ['manila'],
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toHaveProperty('success', false);
+    });
+
+    test('GET /api/discovery/candidates 应返回列表结构', async () => {
+      const response = await request(app).get('/api/discovery/candidates').query({
+        page: 1,
+        pageSize: 10,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('success', true);
+      expect(Array.isArray(response.body.data.items)).toBe(true);
+    });
+
+    test('POST /api/discovery/accept 缺少 candidateIds 应返回400', async () => {
+      const response = await request(app).post('/api/discovery/accept').send({});
+
+      expect(response.status).toBe(400);
+      expect(response.body).toHaveProperty('success', false);
     });
   });
 
