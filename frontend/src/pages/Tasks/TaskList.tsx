@@ -1,5 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Table, Tag, Button, Space, message, Popconfirm, Tooltip, Badge } from 'antd';
+import {
+  Table,
+  Tag,
+  Button,
+  Space,
+  message,
+  Popconfirm,
+  Tooltip,
+  Badge,
+  Tabs,
+  Modal,
+  Form,
+  Select,
+  InputNumber,
+} from 'antd';
 import {
   PlusOutlined,
   PlayCircleOutlined,
@@ -9,21 +23,28 @@ import {
   ReloadOutlined,
   HistoryOutlined,
   EditOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useTaskStore } from '../../stores/task';
 import { tasksApi } from '../../services/api/tasks';
+import { discoveryApi } from '../../services/api/discovery';
+import { accountsApi } from '../../services/api/accounts';
+import { templatesApi } from '../../services/api/templates';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { WsMessageType } from '../../services/websocket/client';
-import type { Task } from '../../types/task';
+import type { Task, TaskDraft } from '../../types/task';
 import { PageHeader } from '../../components/Layout';
 import { TaskForm, TaskHistoryModal } from '../../components/Task';
 import { showError } from '../../utils/notification';
+import type { Account } from '../../types/account';
+import type { Template } from '../../types/template';
 
 /**
  * 任务列表页面
  */
 const TaskList: React.FC = () => {
+  const [confirmForm] = Form.useForm();
   const { tasks, setTasks, updateTask, removeTask, setLoading, loading } = useTaskStore();
   const [refreshing, setRefreshing] = useState(false);
   const [operatingTaskId, setOperatingTaskId] = useState<string | null>(null);
@@ -31,6 +52,19 @@ const TaskList: React.FC = () => {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'tasks' | 'drafts'>('tasks');
+  const [taskDraftsEnabled, setTaskDraftsEnabled] = useState(true);
+  const [drafts, setDrafts] = useState<TaskDraft[]>([]);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftStatusFilter, setDraftStatusFilter] = useState<'pending' | 'confirmed' | 'rejected' | undefined>(
+    'pending'
+  );
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [confirmModalVisible, setConfirmModalVisible] = useState(false);
+  const [confirmingDraftId, setConfirmingDraftId] = useState<string | null>(null);
+  const [confirmingDraft, setConfirmingDraft] = useState<TaskDraft | null>(null);
+  const [rejectingDraftId, setRejectingDraftId] = useState<string | null>(null);
 
   // WebSocket 实时更新任务状态
   useWebSocket(
@@ -63,10 +97,49 @@ const TaskList: React.FC = () => {
     }
   };
 
+  const loadDrafts = async () => {
+    try {
+      setDraftLoading(true);
+      const data = await discoveryApi.listTaskDrafts({
+        status: draftStatusFilter,
+        page: 1,
+        pageSize: 100,
+      });
+      setDrafts(data.items);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '加载任务草稿失败';
+      if (errorMessage.includes('任务草稿功能未开启')) {
+        setTaskDraftsEnabled(false);
+        if (activeTab === 'drafts') {
+          setActiveTab('tasks');
+        }
+        return;
+      }
+      showError(errorMessage || '加载任务草稿失败');
+      console.error('Failed to load task drafts:', error);
+    } finally {
+      setDraftLoading(false);
+    }
+  };
+
+  const loadAccountsAndTemplates = async () => {
+    try {
+      const [accountList, templateList] = await Promise.all([accountsApi.getAll(), templatesApi.getAll()]);
+      setAccounts(accountList);
+      setTemplates(templateList);
+    } catch (error) {
+      console.error('Failed to load confirm options:', error);
+    }
+  };
+
   // 刷新任务列表
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadTasks();
+    const jobs: Array<Promise<void>> = [loadTasks()];
+    if (taskDraftsEnabled) {
+      jobs.push(loadDrafts());
+    }
+    await Promise.all(jobs);
     setRefreshing(false);
     message.success('刷新成功');
   };
@@ -178,6 +251,87 @@ const TaskList: React.FC = () => {
   // 任务表单成功
   const handleTaskFormSuccess = () => {
     loadTasks();
+  };
+
+  const openConfirmDraftModal = (draft: TaskDraft) => {
+    const category = draft.taskType === 'group_posting' ? 'group_message' : 'channel_comment';
+    const matchedTemplates = templates.filter(
+      (template) => template.category === category && template.enabled !== false
+    );
+    const defaultTemplateId =
+      draft.templateId ||
+      matchedTemplates[0]?.id ||
+      templates.find((template) => template.enabled !== false)?.id;
+
+    confirmForm.setFieldsValue({
+      accountIds: draft.accountIds,
+      templateId: defaultTemplateId,
+      priority: draft.priority,
+      interval: draft.config.interval ?? 10,
+      randomDelay: draft.config.randomDelay ?? 1,
+      commentProbability: Math.round((draft.config.commentProbability ?? 0.5) * 100),
+      retryOnError: draft.config.retryOnError ?? true,
+      maxRetries: draft.config.maxRetries ?? 3,
+      autoJoinEnabled: draft.config.autoJoinEnabled ?? true,
+      precheckPolicy: draft.config.precheckPolicy ?? 'partial',
+    });
+    setConfirmingDraftId(draft.id);
+    setConfirmingDraft(draft);
+    setConfirmModalVisible(true);
+  };
+
+  const handleConfirmDraft = async () => {
+    if (!confirmingDraftId) {
+      return;
+    }
+
+    try {
+      const values = await confirmForm.validateFields();
+      const payload = {
+        accountIds: values.accountIds,
+        templateId: values.templateId,
+          priority: values.priority,
+          config: {
+            interval: values.interval,
+            randomDelay: values.randomDelay,
+            commentProbability:
+              values.commentProbability !== undefined && values.commentProbability !== null
+                ? Number(values.commentProbability) / 100
+                : undefined,
+            retryOnError: values.retryOnError,
+            maxRetries: values.maxRetries,
+            autoJoinEnabled: values.autoJoinEnabled,
+          precheckPolicy: values.precheckPolicy,
+        },
+      };
+
+      await discoveryApi.confirmTaskDraft(confirmingDraftId, payload);
+      message.success('草稿确认成功，任务已创建');
+      setConfirmModalVisible(false);
+      setConfirmingDraftId(null);
+      setConfirmingDraft(null);
+      confirmForm.resetFields();
+      await Promise.all([loadDrafts(), loadTasks()]);
+    } catch (error) {
+      if ((error as any)?.errorFields) {
+        message.error('请先完成表单必填项');
+        return;
+      }
+      showError((error as Error).message || '确认草稿失败');
+    }
+  };
+
+  const handleRejectDraft = async (draftId: string) => {
+    try {
+      setRejectingDraftId(draftId);
+      await discoveryApi.rejectTaskDraft(draftId, '人工拒绝');
+      message.success('草稿已拒绝');
+      await loadDrafts();
+    } catch (error) {
+      showError((error as Error).message || '拒绝草稿失败');
+    } finally {
+      setRejectingDraftId(null);
+    }
   };
 
   // 任务类型标签
@@ -395,10 +549,143 @@ const TaskList: React.FC = () => {
     },
   ];
 
+  const draftColumns: ColumnsType<TaskDraft> = [
+    {
+      title: '草稿ID',
+      dataIndex: 'id',
+      key: 'id',
+      width: 220,
+      ellipsis: true,
+    },
+    {
+      title: '来源',
+      dataIndex: 'sourceType',
+      key: 'sourceType',
+      width: 140,
+      render: (value: TaskDraft['sourceType']) => {
+        const text =
+          value === 'telegram_dialog_search'
+            ? '账号可见'
+            : value === 'telegram_global_search'
+              ? '全局搜索'
+              : '索引导航';
+        return <Tag>{text}</Tag>;
+      },
+    },
+    {
+      title: '索引源',
+      dataIndex: 'indexBotUsername',
+      key: 'indexBotUsername',
+      width: 140,
+      render: (value?: string) => value || '-',
+    },
+    {
+      title: '批次',
+      dataIndex: 'runId',
+      key: 'runId',
+      width: 220,
+      ellipsis: true,
+      render: (value?: string) => value || '-',
+    },
+    {
+      title: '任务类型',
+      dataIndex: 'taskType',
+      key: 'taskType',
+      width: 120,
+      render: (value: TaskDraft['taskType']) =>
+        value === 'group_posting' ? <Tag color="blue">群发</Tag> : <Tag color="purple">频道监控</Tag>,
+    },
+    {
+      title: '优先级',
+      dataIndex: 'priority',
+      key: 'priority',
+      width: 90,
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (value: TaskDraft['status']) => {
+        if (value === 'pending') {
+          return <Tag color="processing">待确认</Tag>;
+        }
+        if (value === 'confirmed') {
+          return <Tag color="success">已确认</Tag>;
+        }
+        return <Tag color="error">已拒绝</Tag>;
+      },
+    },
+    {
+      title: '确认任务ID',
+      dataIndex: 'confirmedTaskId',
+      key: 'confirmedTaskId',
+      width: 220,
+      ellipsis: true,
+      render: (value?: string) => value || '-',
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 180,
+      render: (date: string) => new Date(date).toLocaleString('zh-CN'),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 220,
+      fixed: 'right',
+      render: (_, record) => (
+        <Space size="small">
+          <Button
+            type="link"
+            size="small"
+            disabled={record.status !== 'pending'}
+            icon={<FileTextOutlined />}
+            onClick={() => openConfirmDraftModal(record)}
+          >
+            确认
+          </Button>
+          <Popconfirm
+            title="确认拒绝"
+            description="拒绝后该草稿不可确认，确定继续吗？"
+            onConfirm={() => handleRejectDraft(record.id)}
+            okText="确定"
+            cancelText="取消"
+            disabled={record.status !== 'pending'}
+          >
+            <Button
+              type="link"
+              size="small"
+              danger
+              disabled={record.status !== 'pending'}
+              loading={rejectingDraftId === record.id}
+            >
+              拒绝
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
   // 初始化加载
   useEffect(() => {
     loadTasks();
+    if (taskDraftsEnabled) {
+      loadDrafts();
+    }
+    loadAccountsAndTemplates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (taskDraftsEnabled) {
+      loadDrafts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftStatusFilter, taskDraftsEnabled]);
 
   return (
     <div>
@@ -417,17 +704,70 @@ const TaskList: React.FC = () => {
         }
       />
 
-      <Table
-        columns={columns}
-        dataSource={tasks}
-        rowKey="id"
-        loading={loading}
-        pagination={{
-          pageSize: 10,
-          showSizeChanger: true,
-          showTotal: (total) => `共 ${total} 个任务`,
-        }}
-        scroll={{ x: 1600 }}
+      <Tabs
+        activeKey={activeTab}
+        onChange={(key) => setActiveTab(key as 'tasks' | 'drafts')}
+        items={[
+          {
+            key: 'tasks',
+            label: '任务列表',
+            children: (
+              <Table
+                columns={columns}
+                dataSource={tasks}
+                rowKey="id"
+                loading={loading}
+                pagination={{
+                  pageSize: 10,
+                  showSizeChanger: true,
+                  showTotal: (total) => `共 ${total} 个任务`,
+                }}
+                scroll={{ x: 1600 }}
+              />
+            ),
+          },
+          ...(taskDraftsEnabled
+            ? [
+                {
+                  key: 'drafts',
+                  label: '任务草稿',
+                  children: (
+                    <>
+                      <Space style={{ marginBottom: 12 }}>
+                        <Select
+                          allowClear
+                          placeholder="草稿状态"
+                          style={{ width: 160 }}
+                          value={draftStatusFilter}
+                          onChange={(value) => setDraftStatusFilter(value)}
+                          options={[
+                            { label: '待确认', value: 'pending' },
+                            { label: '已确认', value: 'confirmed' },
+                            { label: '已拒绝', value: 'rejected' },
+                          ]}
+                        />
+                        <Button icon={<ReloadOutlined />} onClick={loadDrafts} loading={draftLoading}>
+                          刷新草稿
+                        </Button>
+                      </Space>
+                      <Table
+                        columns={draftColumns}
+                        dataSource={drafts}
+                        rowKey="id"
+                        loading={draftLoading}
+                        pagination={{
+                          pageSize: 10,
+                          showSizeChanger: true,
+                          showTotal: (total) => `共 ${total} 个草稿`,
+                        }}
+                        scroll={{ x: 1700 }}
+                      />
+                    </>
+                  ),
+                },
+              ]
+            : []),
+        ]}
       />
 
       <TaskForm
@@ -436,6 +776,108 @@ const TaskList: React.FC = () => {
         onClose={handleTaskFormClose}
         onSuccess={handleTaskFormSuccess}
       />
+
+      <Modal
+        title="确认任务草稿"
+        open={confirmModalVisible}
+        onCancel={() => {
+          setConfirmModalVisible(false);
+          setConfirmingDraftId(null);
+          setConfirmingDraft(null);
+          confirmForm.resetFields();
+        }}
+        onOk={handleConfirmDraft}
+        destroyOnClose
+      >
+        <Form form={confirmForm} layout="vertical" autoComplete="off">
+          <Form.Item
+            label="执行账号"
+            name="accountIds"
+            rules={[{ required: true, message: '请选择至少一个账号' }]}
+          >
+            <Select
+              mode="multiple"
+              placeholder="选择账号"
+              options={accounts.map((account) => ({
+                label: `${account.phoneNumber}${account.status === 'online' ? '（在线）' : ''}`,
+                value: account.id,
+              }))}
+            />
+          </Form.Item>
+
+          <Form.Item
+            label="模板"
+            name="templateId"
+            rules={[{ required: true, message: '请选择模板' }]}
+          >
+            <Select
+              placeholder="选择模板"
+              options={templates
+                .filter((template) => template.enabled !== false)
+                .filter((template) => {
+                  if (!confirmingDraft) {
+                    return true;
+                  }
+                  if (confirmingDraft.taskType === 'group_posting') {
+                    return template.category === 'group_message';
+                  }
+                  return template.category === 'channel_comment';
+                })
+                .map((template) => ({
+                  label: template.name || template.content?.slice(0, 30) || template.id,
+                  value: template.id,
+                }))}
+            />
+          </Form.Item>
+
+          <Form.Item label="优先级" name="priority" rules={[{ required: true, message: '请填写优先级' }]}>
+            <InputNumber min={1} max={10} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="间隔(分钟)" name="interval" rules={[{ required: true, message: '请填写间隔' }]}>
+            <InputNumber min={10} max={1440} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="随机延迟(分钟)" name="randomDelay">
+            <InputNumber min={0} max={60} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="评论概率(%)" name="commentProbability">
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="重试开关" name="retryOnError">
+            <Select
+              options={[
+                { label: '开启', value: true },
+                { label: '关闭', value: false },
+              ]}
+            />
+          </Form.Item>
+
+          <Form.Item label="最大重试次数" name="maxRetries">
+            <InputNumber min={1} max={10} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="自动加群" name="autoJoinEnabled">
+            <Select
+              options={[
+                { label: '开启', value: true },
+                { label: '关闭', value: false },
+              ]}
+            />
+          </Form.Item>
+
+          <Form.Item label="预检策略" name="precheckPolicy">
+            <Select
+              options={[
+                { label: 'partial（部分可执行）', value: 'partial' },
+                { label: 'strict（全量可执行）', value: 'strict' },
+              ]}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <TaskHistoryModal
         taskId={historyTaskId}

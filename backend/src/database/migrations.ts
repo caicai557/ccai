@@ -51,6 +51,13 @@ const hasColumn = (db: Database.Database, table: string, column: string): boolea
   return rows.some((row) => row.name === column);
 };
 
+const hasTable = (db: Database.Database, table: string): boolean => {
+  const row = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .get(table) as { name: string } | undefined;
+  return Boolean(row?.name);
+};
+
 /**
  * 所有迁移
  */
@@ -177,6 +184,9 @@ const migrations: Migration[] = [
           title TEXT NOT NULL,
           username TEXT,
           invite_link TEXT,
+          owner_id TEXT,
+          owner_name TEXT,
+          owner_username TEXT,
           telegram_id TEXT NOT NULL,
           account_id TEXT NOT NULL,
           region_hint TEXT,
@@ -213,6 +223,418 @@ const migrations: Migration[] = [
       `);
 
       logger.info('✅ 创建 discovery_candidates 表');
+    },
+  },
+  {
+    version: '008',
+    name: 'add_discovery_candidate_owner_fields',
+    up: (db: Database.Database) => {
+      if (!hasColumn(db, 'discovery_candidates', 'owner_id')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN owner_id TEXT
+        `);
+        logger.info('✅ 添加 discovery_candidates.owner_id 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.owner_id 字段（已存在）');
+      }
+
+      if (!hasColumn(db, 'discovery_candidates', 'owner_name')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN owner_name TEXT
+        `);
+        logger.info('✅ 添加 discovery_candidates.owner_name 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.owner_name 字段（已存在）');
+      }
+
+      if (!hasColumn(db, 'discovery_candidates', 'owner_username')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN owner_username TEXT
+        `);
+        logger.info('✅ 添加 discovery_candidates.owner_username 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.owner_username 字段（已存在）');
+      }
+    },
+  },
+  {
+    version: '009',
+    name: 'add_discovery_index_bot_support',
+    up: (db: Database.Database) => {
+      if (!hasTable(db, 'discovery_runs')) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS discovery_runs (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            region_profile TEXT NOT NULL DEFAULT 'manila',
+            keywords TEXT NOT NULL,
+            source_types TEXT NOT NULL,
+            threshold REAL NOT NULL DEFAULT 0.6,
+            dry_run INTEGER NOT NULL DEFAULT 0,
+            include_owner INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
+            summary TEXT,
+            errors TEXT,
+            started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME
+          )
+        `);
+        logger.info('✅ 创建 discovery_runs 表');
+      }
+
+      if (!hasTable(db, 'index_sources')) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS index_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            username TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            parser_type TEXT NOT NULL DEFAULT 'generic' CHECK(parser_type IN ('generic')),
+            throttle_ms INTEGER NOT NULL DEFAULT 1500,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        logger.info('✅ 创建 index_sources 表');
+      }
+
+      if (!hasTable(db, 'discovery_keywords')) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS discovery_keywords (
+            id TEXT PRIMARY KEY,
+            profile TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            weight INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(profile, keyword)
+          )
+        `);
+        logger.info('✅ 创建 discovery_keywords 表');
+      }
+
+      if (!hasColumn(db, 'discovery_candidates', 'source_type')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN source_type TEXT NOT NULL DEFAULT 'telegram_dialog_search'
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'run_id')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN run_id TEXT
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'index_bot_username')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN index_bot_username TEXT
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'region_profile')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN region_profile TEXT NOT NULL DEFAULT 'manila'
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'quality_flags')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN quality_flags TEXT
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'member_count')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN member_count INTEGER
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'last_message_at')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN last_message_at DATETIME
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'reviewed_by')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN reviewed_by TEXT
+        `);
+      }
+      if (!hasColumn(db, 'discovery_candidates', 'reviewed_at')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN reviewed_at DATETIME
+        `);
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_type
+        ON discovery_candidates(source_type)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_run_id
+        ON discovery_candidates(run_id)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_region_profile
+        ON discovery_candidates(region_profile)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_index_bot_username
+        ON discovery_candidates(index_bot_username)
+      `);
+
+      db.exec(`
+        DELETE FROM discovery_candidates
+        WHERE rowid NOT IN (
+          SELECT MAX(rowid)
+          FROM discovery_candidates
+          GROUP BY telegram_id, source_type, region_profile
+        )
+      `);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_candidates_unique_source
+        ON discovery_candidates(telegram_id, source_type, region_profile)
+      `);
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_runs_started_at
+        ON discovery_runs(started_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_runs_status
+        ON discovery_runs(status)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_index_sources_enabled
+        ON index_sources(enabled)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_keywords_profile_enabled
+        ON discovery_keywords(profile, enabled)
+      `);
+
+      const now = new Date().toISOString();
+      const seedSources = [
+        ['SOSO', '@soso', 1500],
+        ['极搜JiSo', '@jiso', 1500],
+        ['极搜极搜', '@jisou', 1500],
+        ['神马索引机器人', '@smss', 1500],
+        ['中文索引', '@TeleTop123Bot', 1500],
+        ['TON 指数', '@TonCnBot', 1500],
+        ['快搜', '@kuai', 1500],
+        ['超级索引', '@CJSY', 1500],
+      ] as const;
+
+      const sourceStmt = db.prepare(`
+        INSERT INTO index_sources (
+          id, name, username, enabled, parser_type, throttle_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'generic', ?, ?, ?)
+        ON CONFLICT(username)
+        DO UPDATE SET
+          name = excluded.name,
+          throttle_ms = excluded.throttle_ms,
+          updated_at = excluded.updated_at
+      `);
+
+      for (const [name, username, throttleMs] of seedSources) {
+        sourceStmt.run(
+          `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+          name,
+          username,
+          throttleMs,
+          now,
+          now
+        );
+      }
+
+      const seedKeywords = [
+        ['manila 华人', 10],
+        ['makati 华社', 9],
+        ['bgc 中文', 8],
+        ['quezon 华人', 8],
+      ] as const;
+
+      const keywordStmt = db.prepare(`
+        INSERT INTO discovery_keywords (
+          id, profile, keyword, weight, enabled, created_at, updated_at
+        ) VALUES (?, 'manila', ?, ?, 1, ?, ?)
+        ON CONFLICT(profile, keyword)
+        DO UPDATE SET
+          weight = excluded.weight,
+          enabled = 1,
+          updated_at = excluded.updated_at
+      `);
+
+      for (const [keyword, weight] of seedKeywords) {
+        keywordStmt.run(
+          `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+          keyword,
+          weight,
+          now,
+          now
+        );
+      }
+
+      logger.info('✅ 完成索引导航发现能力迁移');
+    },
+  },
+  {
+    version: '010',
+    name: 'add_account_pool_and_discovery_quality',
+    up: (db: Database.Database) => {
+      if (!hasColumn(db, 'accounts', 'pool_status')) {
+        db.exec(`
+          ALTER TABLE accounts ADD COLUMN pool_status TEXT NOT NULL DEFAULT 'ok'
+          CHECK(pool_status IN ('ok', 'error', 'banned', 'cooldown'))
+        `);
+        logger.info('✅ 添加 accounts.pool_status 字段');
+      } else {
+        logger.info('跳过 accounts.pool_status 字段（已存在）');
+      }
+
+      if (!hasColumn(db, 'accounts', 'pool_status_updated_at')) {
+        db.exec(`
+          ALTER TABLE accounts ADD COLUMN pool_status_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        `);
+        logger.info('✅ 添加 accounts.pool_status_updated_at 字段');
+      } else {
+        logger.info('跳过 accounts.pool_status_updated_at 字段（已存在）');
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_accounts_pool_status
+        ON accounts(pool_status)
+      `);
+
+      if (!hasColumn(db, 'discovery_candidates', 'source_weight')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN source_weight REAL NOT NULL DEFAULT 1
+        `);
+        logger.info('✅ 添加 discovery_candidates.source_weight 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.source_weight 字段（已存在）');
+      }
+
+      if (!hasColumn(db, 'discovery_candidates', 'post_accept_success_rate')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN post_accept_success_rate REAL NOT NULL DEFAULT 0
+        `);
+        logger.info('✅ 添加 discovery_candidates.post_accept_success_rate 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.post_accept_success_rate 字段（已存在）');
+      }
+
+      if (!hasColumn(db, 'discovery_candidates', 'quality_score')) {
+        db.exec(`
+          ALTER TABLE discovery_candidates ADD COLUMN quality_score REAL NOT NULL DEFAULT 0
+        `);
+        logger.info('✅ 添加 discovery_candidates.quality_score 字段');
+      } else {
+        logger.info('跳过 discovery_candidates.quality_score 字段（已存在）');
+      }
+
+      db.exec(`
+        UPDATE discovery_candidates
+        SET
+          source_weight = COALESCE(source_weight, 1),
+          post_accept_success_rate = COALESCE(post_accept_success_rate, 0),
+          quality_score = CASE
+            WHEN quality_score IS NULL OR quality_score = 0 THEN COALESCE(final_score, 0)
+            ELSE quality_score
+          END
+      `);
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_discovery_candidates_quality_score
+        ON discovery_candidates(quality_score DESC)
+      `);
+    },
+  },
+  {
+    version: '011',
+    name: 'add_task_drafts',
+    up: (db: Database.Database) => {
+      if (!hasTable(db, 'task_drafts')) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS task_drafts (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            task_type TEXT NOT NULL CHECK(task_type IN ('group_posting', 'channel_monitoring')),
+            account_ids TEXT NOT NULL,
+            template_id TEXT,
+            config TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 5 CHECK(priority >= 1 AND priority <= 10),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'rejected')),
+            confirmed_task_id TEXT,
+            reason TEXT,
+            run_id TEXT,
+            source_type TEXT NOT NULL
+              CHECK(source_type IN ('telegram_dialog_search', 'telegram_global_search', 'telegram_index_bot')),
+            index_bot_username TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        logger.info('✅ 创建 task_drafts 表');
+      } else {
+        logger.info('跳过 task_drafts 表（已存在）');
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_drafts_status
+        ON task_drafts(status)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_drafts_run_id
+        ON task_drafts(run_id)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_drafts_source_type
+        ON task_drafts(source_type)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_drafts_created_at
+        ON task_drafts(created_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_drafts_candidate_status
+        ON task_drafts(candidate_id, status)
+      `);
+    },
+  },
+  {
+    version: '012',
+    name: 'enforce_task_draft_active_unique',
+    up: (db: Database.Database) => {
+      if (!hasTable(db, 'task_drafts')) {
+        logger.info('跳过 task_drafts 活跃唯一约束（表不存在）');
+        return;
+      }
+
+      db.exec(`
+        UPDATE task_drafts
+        SET
+          status = 'rejected',
+          reason = CASE
+            WHEN reason IS NULL OR TRIM(reason) = '' THEN '系统去重（迁移）'
+            ELSE reason
+          END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE rowid IN (
+          SELECT current.rowid
+          FROM task_drafts current
+          WHERE current.status IN ('pending', 'confirmed')
+            AND EXISTS (
+              SELECT 1
+              FROM task_drafts newer
+              WHERE newer.candidate_id = current.candidate_id
+                AND newer.status IN ('pending', 'confirmed')
+                AND newer.rowid > current.rowid
+            )
+        )
+      `);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_drafts_candidate_active_unique
+        ON task_drafts(candidate_id)
+        WHERE status IN ('pending', 'confirmed')
+      `);
     },
   },
 ];

@@ -2,9 +2,23 @@ import Database from 'better-sqlite3';
 import * as cron from 'node-cron';
 import { TaskDao } from '../../database/dao/TaskDao';
 import { TaskExecutionDao } from '../../database/dao/TaskExecutionDao';
-import { Task, CreateTaskDto } from '../../types/task';
+import { TargetDao } from '../../database/dao/TargetDao';
+import {
+  CreateTaskDto,
+  PrecheckPolicy,
+  Task,
+  TaskBlockedPair,
+  TaskPrecheckSummary,
+  TaskReadyPair,
+  TaskStartResult,
+} from '../../types/task';
 import { MessageService } from '../message/MessageService';
 import { TemplateService } from '../template/TemplateService';
+import {
+  TargetAccessCheckInput,
+  TargetAccessCheckResult,
+  TargetAccessService,
+} from '../target/TargetAccessService';
 import { logger } from '../../utils/logger';
 import { wsManager } from '../../routes/ws';
 
@@ -13,6 +27,8 @@ import { wsManager } from '../../routes/ws';
  */
 interface TaskExecutionContext {
   task: Task;
+  readyPairs: TaskReadyPair[];
+  blockedPairs: TaskBlockedPair[];
   cronJob?: cron.ScheduledTask;
   isExecuting: boolean;
   lastExecutionTime?: Date;
@@ -22,6 +38,15 @@ interface TaskExecutionContext {
 
 interface ChannelMessage {
   id: number;
+  commentEnabled?: boolean;
+}
+
+interface TargetAccessChecker {
+  checkAndPrepare(input: TargetAccessCheckInput): Promise<TargetAccessCheckResult>;
+}
+
+interface TaskServiceDeps {
+  targetAccessService?: TargetAccessChecker;
 }
 
 /**
@@ -31,6 +56,8 @@ interface ChannelMessage {
 export class TaskService {
   private taskDao: TaskDao;
   private taskExecutionDao: TaskExecutionDao;
+  private targetDao: TargetDao;
+  private targetAccessService: TargetAccessChecker;
   private messageService: MessageService;
   private templateService: TemplateService;
 
@@ -43,9 +70,11 @@ export class TaskService {
   // 已评论的消息ID集合（用于评论去重）
   private commentedMessages: Map<string, Set<number>> = new Map();
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, deps: TaskServiceDeps = {}) {
     this.taskDao = new TaskDao(db);
     this.taskExecutionDao = new TaskExecutionDao(db);
+    this.targetDao = new TargetDao(db);
+    this.targetAccessService = deps.targetAccessService || new TargetAccessService(this.targetDao);
     this.messageService = new MessageService(db);
     this.templateService = new TemplateService(db);
   }
@@ -91,6 +120,10 @@ export class TaskService {
    * 创建任务
    */
   async createTask(dto: CreateTaskDto): Promise<Task> {
+    return this.createTaskSync(dto);
+  }
+
+  createTaskSync(dto: CreateTaskDto): Task {
     // 验证任务配置
     this.validateTaskConfig(dto);
 
@@ -261,7 +294,7 @@ export class TaskService {
   /**
    * 启动任务
    */
-  async startTask(taskId: string): Promise<void> {
+  async startTask(taskId: string): Promise<TaskStartResult> {
     const task = this.taskDao.findById(taskId);
     if (!task) {
       throw new Error(`任务不存在: ${taskId}`);
@@ -269,25 +302,49 @@ export class TaskService {
 
     if (task.status === 'running') {
       logger.warn(`任务已在运行: ${taskId}`);
-      return;
+      const precheck = this.buildEmptyPrecheck(
+        task.config.precheckPolicy || 'partial',
+        task.config.autoJoinEnabled !== false
+      );
+      return {
+        started: true,
+        message: '任务已在运行',
+        precheck,
+      };
     }
 
     logger.info(`启动任务: id=${taskId}, type=${task.type}`);
+
+    const precheck = await this.precheckTaskAccess(task);
+    if (precheck.readyPairs.length === 0) {
+      const reasonSummary = this.formatBlockedReasons(precheck.blockedReasons);
+      throw new Error(`任务预检失败: 无可用账号-目标组合 (${reasonSummary})`);
+    }
+
+    if (precheck.policy === 'strict' && precheck.blockedPairs.length > 0) {
+      const reasonSummary = this.formatBlockedReasons(precheck.blockedReasons);
+      throw new Error(`任务预检失败: strict策略下存在不可用账号-目标组合 (${reasonSummary})`);
+    }
 
     // 更新任务状态
     this.taskDao.updateStatus(taskId, 'running');
 
     // 根据任务类型启动不同的执行器
     if (task.type === 'group_posting') {
-      await this.startGroupPostingTask(task);
+      await this.startGroupPostingTask(task, precheck);
     } else if (task.type === 'channel_monitoring') {
-      await this.startChannelMonitoringTask(task);
+      await this.startChannelMonitoringTask(task, precheck);
     }
 
     // 推送任务状态变化
     this.broadcastTaskStatus(taskId);
 
     logger.info(`任务启动成功: id=${taskId}`);
+    return {
+      started: true,
+      message: '任务启动成功',
+      precheck,
+    };
   }
 
   /**
@@ -319,10 +376,19 @@ export class TaskService {
 
       // 停止频道监听
       if (task.type === 'channel_monitoring') {
-        for (const accountId of task.accountIds) {
-          for (const channelId of task.targetIds) {
-            await this.messageService.stopListening(accountId, channelId);
-          }
+        const pairs =
+          context.readyPairs.length > 0
+            ? context.readyPairs
+            : task.accountIds.flatMap((accountId) =>
+                task.targetIds.map((targetId) => ({
+                  accountId,
+                  targetId,
+                  telegramId: this.resolveTelegramTargetId(targetId),
+                }))
+              );
+
+        for (const pair of pairs) {
+          await this.messageService.stopListening(pair.accountId, pair.telegramId);
         }
       }
 
@@ -346,7 +412,7 @@ export class TaskService {
   /**
    * 启动群组发送任务
    */
-  private async startGroupPostingTask(task: Task): Promise<void> {
+  private async startGroupPostingTask(task: Task, precheck: TaskPrecheckSummary): Promise<void> {
     const { interval } = task.config;
 
     // 计算cron表达式（每N分钟执行一次）
@@ -360,6 +426,8 @@ export class TaskService {
     // 保存任务上下文
     this.taskContexts.set(task.id, {
       task,
+      readyPairs: precheck.readyPairs,
+      blockedPairs: precheck.blockedPairs,
       cronJob,
       isExecuting: false,
       executionCount: 0,
@@ -375,27 +443,32 @@ export class TaskService {
   /**
    * 启动频道监听任务
    */
-  private async startChannelMonitoringTask(task: Task): Promise<void> {
-    // 为每个账号和频道组合设置监听
-    for (const accountId of task.accountIds) {
-      for (const channelId of task.targetIds) {
-        await this.messageService.listenToChannel(accountId, channelId, async (message) => {
-          await this.handleNewChannelMessage(task.id, accountId, channelId, message);
-        });
-      }
+  private async startChannelMonitoringTask(
+    task: Task,
+    precheck: TaskPrecheckSummary
+  ): Promise<void> {
+    // 为每个可用账号和频道组合设置监听
+    for (const pair of precheck.readyPairs) {
+      await this.messageService.listenToChannel(
+        pair.accountId,
+        pair.telegramId,
+        async (message) => {
+          await this.handleNewChannelMessage(task.id, pair, message);
+        }
+      );
     }
 
     // 保存任务上下文
     this.taskContexts.set(task.id, {
       task,
+      readyPairs: precheck.readyPairs,
+      blockedPairs: precheck.blockedPairs,
       isExecuting: false,
       executionCount: 0,
       failureCount: 0,
     });
 
-    logger.info(
-      `频道监听任务已启动: id=${task.id}, accounts=${task.accountIds.length}, channels=${task.targetIds.length}`
-    );
+    logger.info(`频道监听任务已启动: id=${task.id}, readyPairs=${precheck.readyPairs.length}`);
   }
 
   /**
@@ -426,11 +499,16 @@ export class TaskService {
       const { task } = context;
       logger.info(`执行群组发送任务: id=${taskId}`);
 
-      // 随机选择一个账号
-      const accountId = this.selectRandomAccount(task.accountIds);
+      if (context.readyPairs.length === 0) {
+        logger.warn(`任务无可用账号-目标组合，跳过执行: ${taskId}`);
+        return;
+      }
 
-      // 随机选择一个目标群组
-      const targetId = this.selectRandomTarget(task.targetIds);
+      // 随机选择一个可用组合
+      const pair = this.selectRandomReadyPair(context.readyPairs);
+      const accountId = pair.accountId;
+      const targetId = pair.targetId;
+      const telegramTargetId = pair.telegramId;
 
       // 检查账号锁
       if (!(await this.acquireAccountLock(accountId))) {
@@ -465,7 +543,7 @@ export class TaskService {
         const result = await this.messageService.sendMessageWithRetry(
           {
             accountId,
-            targetId,
+            targetId: telegramTargetId,
             targetType: 'group',
             content,
           },
@@ -491,7 +569,7 @@ export class TaskService {
           this.broadcastTaskStatus(taskId);
 
           logger.info(
-            `✅ 群组消息发送成功: task=${taskId}, account=${accountId}, target=${targetId}`
+            `✅ 群组消息发送成功: task=${taskId}, account=${accountId}, target=${telegramTargetId}`
           );
         } else {
           context.failureCount++;
@@ -510,6 +588,21 @@ export class TaskService {
 
           // 推送任务状态更新
           this.broadcastTaskStatus(taskId);
+
+          if (result.error?.code === 'PERMISSION_DENIED') {
+            this.blockReadyPair(
+              context,
+              {
+                accountId,
+                targetId,
+                telegramId: telegramTargetId,
+                code: 'TARGET_WRITE_FORBIDDEN',
+                message: result.error.message || '账号没有发言权限',
+                autoJoinAttempted: false,
+              },
+              taskId
+            );
+          }
 
           logger.error(`❌ 群组消息发送失败: task=${taskId}, error=${result.error?.message}`);
         }
@@ -530,8 +623,7 @@ export class TaskService {
    */
   private async handleNewChannelMessage(
     taskId: string,
-    accountId: string,
-    channelId: string,
+    pair: TaskReadyPair,
     message: ChannelMessage
   ): Promise<void> {
     const context = this.taskContexts.get(taskId);
@@ -541,9 +633,19 @@ export class TaskService {
     }
 
     const { task } = context;
+    const accountId = pair.accountId;
+    const targetId = pair.targetId;
+    const channelId = pair.telegramId;
 
     try {
       logger.info(`收到频道新消息: task=${taskId}, channel=${channelId}, message=${message.id}`);
+
+      if (message.commentEnabled === false) {
+        logger.warn(
+          `频道消息未开启评论，跳过: task=${taskId}, channel=${channelId}, message=${message.id}`
+        );
+        return;
+      }
 
       // 检查评论概率
       const probability = task.config.commentProbability || 1.0;
@@ -553,7 +655,7 @@ export class TaskService {
       }
 
       // 检查是否已评论过
-      const commentKey = `${accountId}:${channelId}`;
+      const commentKey = `${accountId}:${targetId}`;
       if (!this.commentedMessages.has(commentKey)) {
         this.commentedMessages.set(commentKey, new Set());
       }
@@ -571,12 +673,16 @@ export class TaskService {
       }
 
       try {
-        // 添加随机延迟（1-5分钟）
-        const minDelay = 1 * 60 * 1000; // 1分钟
-        const maxDelay = 5 * 60 * 1000; // 5分钟
-        const delayMs = minDelay + Math.random() * (maxDelay - minDelay);
-        logger.debug(`添加随机延迟: ${Math.round(delayMs / 1000)}秒`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        // 添加随机延迟（分钟），由任务配置控制；为0时立即评论
+        const maxDelayMinutes = Math.max(0, task.config.randomDelay || 0);
+        const delayMs = maxDelayMinutes > 0 ? Math.random() * maxDelayMinutes * 60 * 1000 : 0;
+
+        if (delayMs > 0) {
+          logger.debug(`添加随机延迟: ${Math.round(delayMs / 1000)}秒`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        } else {
+          logger.debug('未配置评论随机延迟，立即执行评论');
+        }
 
         // 生成评论内容（从模板）
         const templates = await this.templateService.getEnabledTemplates('channel_comment');
@@ -616,7 +722,7 @@ export class TaskService {
             messageContent: content,
             targetMessageId: String(message.id),
             accountId,
-            targetId: channelId,
+            targetId,
             retryCount: 0,
           });
 
@@ -635,9 +741,24 @@ export class TaskService {
             errorMessage: result.error?.message || '未知错误',
             targetMessageId: String(message.id),
             accountId,
-            targetId: channelId,
+            targetId,
             retryCount: maxRetries - 1,
           });
+
+          if (result.error?.code === 'PERMISSION_DENIED') {
+            this.blockReadyPair(
+              context,
+              {
+                accountId,
+                targetId,
+                telegramId: channelId,
+                code: 'TARGET_WRITE_FORBIDDEN',
+                message: result.error.message || '账号没有评论权限',
+                autoJoinAttempted: false,
+              },
+              taskId
+            );
+          }
 
           logger.error(`❌ 频道评论发送失败: task=${taskId}, error=${result.error?.message}`);
         }
@@ -665,24 +786,112 @@ export class TaskService {
     return currentTime >= timeRange.start && currentTime <= timeRange.end;
   }
 
-  /**
-   * 随机选择一个账号
-   */
-  private selectRandomAccount(accountIds: string[]): string {
-    if (accountIds.length === 0) {
-      throw new Error('账号列表为空');
+  private selectRandomReadyPair(readyPairs: TaskReadyPair[]): TaskReadyPair {
+    if (readyPairs.length === 0) {
+      throw new Error('可用目标组合为空');
     }
-    return accountIds[Math.floor(Math.random() * accountIds.length)]!;
+    return readyPairs[Math.floor(Math.random() * readyPairs.length)]!;
+  }
+
+  private blockReadyPair(
+    context: TaskExecutionContext,
+    blockedPair: TaskBlockedPair,
+    taskId: string
+  ): void {
+    context.readyPairs = context.readyPairs.filter(
+      (pair) =>
+        !(pair.accountId === blockedPair.accountId && pair.targetId === blockedPair.targetId)
+    );
+
+    const exists = context.blockedPairs.some(
+      (pair) => pair.accountId === blockedPair.accountId && pair.targetId === blockedPair.targetId
+    );
+    if (!exists) {
+      context.blockedPairs.push(blockedPair);
+    }
+
+    logger.warn(
+      `任务组合已阻塞: task=${taskId}, account=${blockedPair.accountId}, target=${blockedPair.targetId}, code=${blockedPair.code}`
+    );
+  }
+
+  private buildEmptyPrecheck(
+    policy: PrecheckPolicy,
+    autoJoinEnabled: boolean
+  ): TaskPrecheckSummary {
+    return {
+      policy,
+      autoJoinEnabled,
+      readyPairs: [],
+      blockedPairs: [],
+      blockedReasons: {},
+    };
+  }
+
+  private async precheckTaskAccess(task: Task): Promise<TaskPrecheckSummary> {
+    const policy: PrecheckPolicy = task.config.precheckPolicy || 'partial';
+    const autoJoinEnabled = task.config.autoJoinEnabled !== false;
+    const precheck = this.buildEmptyPrecheck(policy, autoJoinEnabled);
+
+    for (const accountId of task.accountIds) {
+      for (const targetId of task.targetIds) {
+        const result = await this.targetAccessService.checkAndPrepare({
+          accountId,
+          targetId,
+          taskType: task.type,
+          autoJoinEnabled,
+        });
+
+        if (result.readyPair) {
+          precheck.readyPairs.push(result.readyPair);
+          continue;
+        }
+
+        if (result.blockedPair) {
+          precheck.blockedPairs.push(result.blockedPair);
+        }
+      }
+    }
+
+    precheck.blockedReasons = this.collectBlockedReasons(precheck.blockedPairs);
+    logger.info(
+      `任务预检结果: task=${task.id}, ready=${precheck.readyPairs.length}, blocked=${precheck.blockedPairs.length}, reasons=${JSON.stringify(precheck.blockedReasons)}`
+    );
+    return precheck;
+  }
+
+  private collectBlockedReasons(blockedPairs: TaskBlockedPair[]): Record<string, number> {
+    const reasonMap: Record<string, number> = {};
+
+    for (const pair of blockedPairs) {
+      const current = reasonMap[pair.code] || 0;
+      reasonMap[pair.code] = current + 1;
+    }
+
+    return reasonMap;
+  }
+
+  private formatBlockedReasons(blockedReasons: Record<string, number>): string {
+    const entries = Object.entries(blockedReasons);
+    if (entries.length === 0) {
+      return 'NO_BLOCK_REASON';
+    }
+
+    return entries.map(([code, count]) => `${code}=${count}`).join(', ');
   }
 
   /**
-   * 随机选择一个目标
+   * 解析任务目标ID为Telegram可识别目标
+   * 兼容两种存储：内部目标ID / 直接telegramId
    */
-  private selectRandomTarget(targetIds: string[]): string {
-    if (targetIds.length === 0) {
-      throw new Error('目标列表为空');
+  private resolveTelegramTargetId(targetId: string): string {
+    const target = this.targetDao.findById(targetId);
+    if (!target) {
+      return targetId;
     }
-    return targetIds[Math.floor(Math.random() * targetIds.length)]!;
+
+    const telegramId = target.telegramId?.trim();
+    return telegramId || targetId;
   }
 
   /**
@@ -711,24 +920,46 @@ export class TaskService {
     logger.info('恢复运行中的任务...');
 
     const runningTasks = this.taskDao.findByStatus('running');
+    let restoredCount = 0;
+    let stoppedCount = 0;
 
     for (const task of runningTasks) {
       try {
         logger.info(`恢复任务: id=${task.id}, type=${task.type}`);
 
+        const precheck = await this.precheckTaskAccess(task);
+        if (precheck.readyPairs.length === 0) {
+          logger.warn(`恢复任务失败（无可用组合），将任务置为停止: ${task.id}`);
+          this.taskDao.updateStatus(task.id, 'stopped');
+          this.broadcastTaskStatus(task.id);
+          stoppedCount++;
+          continue;
+        }
+
+        if (precheck.policy === 'strict' && precheck.blockedPairs.length > 0) {
+          logger.warn(`恢复任务失败（strict策略存在阻塞组合），将任务置为停止: ${task.id}`);
+          this.taskDao.updateStatus(task.id, 'stopped');
+          this.broadcastTaskStatus(task.id);
+          stoppedCount++;
+          continue;
+        }
+
         if (task.type === 'group_posting') {
-          await this.startGroupPostingTask(task);
+          await this.startGroupPostingTask(task, precheck);
         } else if (task.type === 'channel_monitoring') {
-          await this.startChannelMonitoringTask(task);
+          await this.startChannelMonitoringTask(task, precheck);
         }
 
         logger.info(`任务恢复成功: id=${task.id}`);
+        restoredCount++;
       } catch (error) {
         logger.error(`恢复任务失败: id=${task.id}`, error);
       }
     }
 
-    logger.info(`✅ 已恢复 ${runningTasks.length} 个运行中的任务`);
+    logger.info(
+      `✅ 任务恢复完成: 原运行=${runningTasks.length}, 成功恢复=${restoredCount}, 已停止=${stoppedCount}`
+    );
   }
 
   /**

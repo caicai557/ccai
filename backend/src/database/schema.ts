@@ -19,6 +19,9 @@ export const createTables = (db: Database.Database): void => {
       add_method TEXT NOT NULL DEFAULT 'phone'
         CHECK(add_method IN ('phone', 'session')),
       status TEXT NOT NULL DEFAULT 'offline',
+      pool_status TEXT NOT NULL DEFAULT 'ok'
+        CHECK(pool_status IN ('ok', 'error', 'banned', 'cooldown')),
+      pool_status_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       health_score INTEGER NOT NULL DEFAULT 100
         CHECK(health_score >= 0 AND health_score <= 100),
       last_active DATETIME,
@@ -160,15 +163,31 @@ export const createTables = (db: Database.Database): void => {
     CREATE TABLE IF NOT EXISTS discovery_candidates (
       id TEXT PRIMARY KEY,
       source TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'telegram_dialog_search'
+        CHECK(source_type IN ('telegram_dialog_search', 'telegram_global_search', 'telegram_index_bot')),
       type TEXT NOT NULL CHECK(type IN ('group', 'channel')),
       title TEXT NOT NULL,
       username TEXT,
       invite_link TEXT,
+      owner_id TEXT,
+      owner_name TEXT,
+      owner_username TEXT,
       telegram_id TEXT NOT NULL,
       account_id TEXT NOT NULL,
+      run_id TEXT,
+      index_bot_username TEXT,
+      region_profile TEXT NOT NULL DEFAULT 'manila',
       region_hint TEXT,
       description TEXT,
       recent_message_summary TEXT,
+      quality_flags TEXT,
+      member_count INTEGER,
+      last_message_at DATETIME,
+      source_weight REAL NOT NULL DEFAULT 1,
+      post_accept_success_rate REAL NOT NULL DEFAULT 0,
+      quality_score REAL NOT NULL DEFAULT 0,
+      reviewed_by TEXT,
+      reviewed_at DATETIME,
       rules_score REAL NOT NULL DEFAULT 0,
       ai_score REAL,
       final_score REAL NOT NULL DEFAULT 0,
@@ -184,6 +203,80 @@ export const createTables = (db: Database.Database): void => {
     )
   `);
   logger.info('✅ 创建表: discovery_candidates');
+
+  // 智能发现运行批次表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS discovery_runs (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      region_profile TEXT NOT NULL DEFAULT 'manila',
+      keywords TEXT NOT NULL,
+      source_types TEXT NOT NULL,
+      threshold REAL NOT NULL DEFAULT 0.6,
+      dry_run INTEGER NOT NULL DEFAULT 0,
+      include_owner INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
+      summary TEXT,
+      errors TEXT,
+      started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      finished_at DATETIME
+    )
+  `);
+  logger.info('✅ 创建表: discovery_runs');
+
+  // 索引导航来源配置表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS index_sources (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      username TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      parser_type TEXT NOT NULL DEFAULT 'generic' CHECK(parser_type IN ('generic')),
+      throttle_ms INTEGER NOT NULL DEFAULT 1500,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  logger.info('✅ 创建表: index_sources');
+
+  // 智能发现关键词配置表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS discovery_keywords (
+      id TEXT PRIMARY KEY,
+      profile TEXT NOT NULL,
+      keyword TEXT NOT NULL,
+      weight INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(profile, keyword)
+    )
+  `);
+  logger.info('✅ 创建表: discovery_keywords');
+
+  // 任务草稿表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_drafts (
+      id TEXT PRIMARY KEY,
+      candidate_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      task_type TEXT NOT NULL CHECK(task_type IN ('group_posting', 'channel_monitoring')),
+      account_ids TEXT NOT NULL,
+      template_id TEXT,
+      config TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 5 CHECK(priority >= 1 AND priority <= 10),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'rejected')),
+      confirmed_task_id TEXT,
+      reason TEXT,
+      run_id TEXT,
+      source_type TEXT NOT NULL
+        CHECK(source_type IN ('telegram_dialog_search', 'telegram_global_search', 'telegram_index_bot')),
+      index_bot_username TEXT,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  logger.info('✅ 创建表: task_drafts');
 
   logger.info('✅ 所有数据库表创建完成');
 };
@@ -254,6 +347,11 @@ export const createIndexes = (db: Database.Database): void => {
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_accounts_pool_status
+    ON accounts(pool_status)
+  `);
+
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status
     ON discovery_candidates(status)
   `);
@@ -266,6 +364,57 @@ export const createIndexes = (db: Database.Database): void => {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_discovery_candidates_telegram_id
     ON discovery_candidates(telegram_id)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_candidates_quality_score
+    ON discovery_candidates(quality_score DESC)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_runs_started_at
+    ON discovery_runs(started_at)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_runs_status
+    ON discovery_runs(status)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_index_sources_enabled
+    ON index_sources(enabled)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_discovery_keywords_profile_enabled
+    ON discovery_keywords(profile, enabled)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_drafts_status
+    ON task_drafts(status)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_drafts_run_id
+    ON task_drafts(run_id)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_drafts_source_type
+    ON task_drafts(source_type)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_drafts_created_at
+    ON task_drafts(created_at)
+  `);
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_drafts_candidate_active_unique
+    ON task_drafts(candidate_id)
+    WHERE status IN ('pending', 'confirmed')
   `);
 
   logger.info('✅ 所有索引创建完成');
