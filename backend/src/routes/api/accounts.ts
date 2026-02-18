@@ -103,6 +103,22 @@ const parseArrayField = (value: unknown): string[] => {
     .filter((item) => item.length > 0);
 };
 
+const parsePositiveIntegerQuery = (
+  raw: unknown,
+  options: { label: string; fallback: number; min?: number; max?: number }
+): number => {
+  const { label, fallback, min = 1, max = Number.MAX_SAFE_INTEGER } = options;
+  const firstRaw = Array.isArray(raw) ? raw[0] : raw;
+  if (firstRaw === undefined || firstRaw === null || String(firstRaw).trim().length === 0) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(String(firstRaw), 10);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new AppError(400, `${label} 参数无效`);
+  }
+  return parsed;
+};
+
 /**
  * POST /api/accounts/phone
  * 手机号登录（发送验证码）
@@ -346,14 +362,12 @@ router.get(
       throw new AppError(400, 'status 参数无效');
     }
 
-    const page = req.query['page'] ? Number(req.query['page']) : 1;
-    const pageSize = req.query['pageSize'] ? Number(req.query['pageSize']) : 20;
-    if (!Number.isInteger(page) || page <= 0) {
-      throw new AppError(400, 'page 参数无效');
-    }
-    if (!Number.isInteger(pageSize) || pageSize <= 0 || pageSize > 100) {
-      throw new AppError(400, 'pageSize 参数无效');
-    }
+    const page = parsePositiveIntegerQuery(req.query['page'], { label: 'page', fallback: 1 });
+    const pageSize = parsePositiveIntegerQuery(req.query['pageSize'], {
+      label: 'pageSize',
+      fallback: 20,
+      max: 100,
+    });
 
     const result = accountProfileBatchService.listJobs({
       status,
