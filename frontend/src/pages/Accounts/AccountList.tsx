@@ -262,7 +262,8 @@ const AccountList: React.FC = () => {
       await loadProfileBatchJobs(1, jobPageSize);
       await loadProfileBatchJobDetail(job.id);
     } catch (error) {
-      showError('创建资料批次失败');
+      const message = error instanceof Error ? error.message : '创建资料批次失败';
+      showError(message || '创建资料批次失败');
       console.error('Failed to create profile batch job:', error);
     } finally {
       setBatchSubmitting(false);
