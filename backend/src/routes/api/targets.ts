@@ -6,12 +6,14 @@ import { asyncHandler, AppError } from '../../middleware/errorHandler';
 import { TargetDao } from '../../database/dao/TargetDao';
 import { getDatabase } from '../../database/init';
 import { logger } from '../../utils/logger';
-import { TargetDiscoveryService } from '../../services/target/TargetDiscoveryService';
+import {
+  buildTelegramTargetIdLookupCandidates,
+  normalizeTelegramTargetId,
+} from '../../utils/telegramId';
 
 const router: Router = Router();
 const db = getDatabase();
 const targetDao = new TargetDao(db);
-const targetDiscoveryService = new TargetDiscoveryService(targetDao);
 
 /**
  * POST /api/targets
@@ -30,20 +32,35 @@ router.post(
       throw new AppError(400, '类型必须是 group 或 channel');
     }
 
+    const normalizedTelegramId = normalizeTelegramTargetId(telegramId, type);
+    if (!normalizedTelegramId) {
+      throw new AppError(400, 'telegramId 不能为空');
+    }
+
     logger.info(`添加目标: ${title} (${type})`);
 
-    const duplicated = targetDao.findByTelegramId(String(telegramId).trim());
+    const lookupCandidates = buildTelegramTargetIdLookupCandidates(normalizedTelegramId, type);
+    const duplicated = targetDao.findByTelegramIds(lookupCandidates)[0];
     if (duplicated) {
       throw new AppError(409, '目标已存在');
     }
 
-    const target = targetDao.create({
-      type,
-      telegramId: String(telegramId).trim(),
-      inviteLink,
-      title: String(title).trim(),
-      enabled: true,
-    });
+    let target;
+    try {
+      target = targetDao.create({
+        type,
+        telegramId: normalizedTelegramId,
+        inviteLink,
+        title: String(title).trim(),
+        enabled: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message.includes('UNIQUE constraint failed')) {
+        throw new AppError(409, '目标已存在');
+      }
+      throw error;
+    }
 
     res.json({
       success: true,
@@ -84,67 +101,6 @@ router.get(
       data: {
         targets,
         total: targets.length,
-      },
-    });
-  })
-);
-
-/**
- * GET /api/targets/search
- * 按关键词搜索账号可访问群组/频道
- */
-router.get(
-  '/search',
-  asyncHandler(async (req: Request, res: Response) => {
-    const accountId = String(req.query['accountId'] || '').trim();
-    const keyword = String(req.query['keyword'] || '').trim();
-    const limit = Number(req.query['limit'] || 50);
-
-    if (!accountId) {
-      throw new AppError(400, 'accountId 不能为空');
-    }
-
-    let results;
-    try {
-      results = await targetDiscoveryService.searchByKeyword(accountId, keyword, limit);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '搜索目标失败';
-      throw new AppError(400, message);
-    }
-
-    res.json({
-      success: true,
-      data: {
-        items: results,
-        total: results.length,
-      },
-    });
-  })
-);
-
-/**
- * POST /api/targets/batch-add
- * 批量添加目标
- */
-router.post(
-  '/batch-add',
-  asyncHandler(async (req: Request, res: Response) => {
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
-    if (items.length === 0) {
-      throw new AppError(400, 'items 不能为空');
-    }
-
-    const result = targetDiscoveryService.batchAddTargets(items);
-
-    res.json({
-      success: true,
-      data: {
-        ...result,
-        summary: {
-          created: result.created.length,
-          duplicated: result.duplicated.length,
-          failed: result.failed.length,
-        },
       },
     });
   })

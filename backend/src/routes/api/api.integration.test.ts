@@ -224,6 +224,18 @@ describe('API端点集成测试', () => {
       targetId = response.body.data.target.id;
     });
 
+    test('POST /api/targets 对规范化后重复ID应返回409', async () => {
+      const response = await request(app).post('/api/targets').send({
+        type: 'group',
+        telegramId: '1234567890',
+        title: '测试群组重复ID',
+      });
+
+      expect(response.status).toBe(409);
+      expect(response.body).toHaveProperty('success', false);
+      expect(response.body.error).toHaveProperty('message', '目标已存在');
+    });
+
     test('GET /api/targets 应该返回目标列表', async () => {
       const response = await request(app).get('/api/targets');
 
@@ -262,32 +274,132 @@ describe('API端点集成测试', () => {
     });
   });
 
-  describe('智能发现API', () => {
-    test('POST /api/discovery/run 缺少 accountId 应返回400', async () => {
-      const response = await request(app).post('/api/discovery/run').send({
-        keywords: ['manila'],
-      });
+  describe('账号池管理API', () => {
+    let accountOkId: string;
+    let accountErrorId: string;
 
-      expect(response.status).toBe(400);
-      expect(response.body).toHaveProperty('success', false);
+    beforeEach(() => {
+      const accountDao = DaoFactory.getInstance().getAccountDao();
+      const accountOk = accountDao.create({
+        phoneNumber: `+861300000${Date.now().toString().slice(-4)}`,
+        session: '',
+        status: 'offline',
+      });
+      const accountError = accountDao.create({
+        phoneNumber: `+861500000${Date.now().toString().slice(-4)}`,
+        session: '',
+        status: 'offline',
+      });
+      accountDao.updatePoolStatus(accountError.id, 'error');
+
+      accountOkId = accountOk.id;
+      accountErrorId = accountError.id;
     });
 
-    test('GET /api/discovery/candidates 应返回列表结构', async () => {
-      const response = await request(app).get('/api/discovery/candidates').query({
-        page: 1,
-        pageSize: 10,
+    afterEach(() => {
+      const accountDao = DaoFactory.getInstance().getAccountDao();
+      accountDao.delete(accountOkId);
+      accountDao.delete(accountErrorId);
+    });
+
+    test('GET /api/accounts 支持按 poolStatus 过滤', async () => {
+      const response = await request(app).get('/api/accounts').query({
+        poolStatus: 'error',
       });
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('success', true);
-      expect(Array.isArray(response.body.data.items)).toBe(true);
+      expect(Array.isArray(response.body.data.accounts)).toBe(true);
+      expect(response.body.data.accounts.every((item: any) => item.poolStatus === 'error')).toBe(true);
     });
 
-    test('POST /api/discovery/accept 缺少 candidateIds 应返回400', async () => {
-      const response = await request(app).post('/api/discovery/accept').send({});
+    test('POST /api/accounts/:id/pool-status 应更新账号池状态', async () => {
+      const response = await request(app).post(`/api/accounts/${accountOkId}/pool-status`).send({
+        poolStatus: 'cooldown',
+      });
 
-      expect(response.status).toBe(400);
-      expect(response.body).toHaveProperty('success', false);
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('success', true);
+      expect(response.body.data.account).toHaveProperty('id', accountOkId);
+      expect(response.body.data.account).toHaveProperty('poolStatus', 'cooldown');
+    });
+  });
+
+  describe('账号资料批量修改API', () => {
+    let accountId = '';
+
+    beforeEach(() => {
+      const accountDao = DaoFactory.getInstance().getAccountDao();
+      const account = accountDao.create({
+        phoneNumber: `+861660000${Date.now().toString().slice(-4)}`,
+        session: '',
+        status: 'offline',
+      });
+      accountId = account.id;
+    });
+
+    afterEach(() => {
+      const accountDao = DaoFactory.getInstance().getAccountDao();
+      accountDao.delete(accountId);
+      db.prepare('DELETE FROM account_profile_job_items').run();
+      db.prepare('DELETE FROM account_profile_jobs').run();
+    });
+
+    test('POST/GET /api/accounts/profile-batch/jobs 应支持创建与查询', async () => {
+      const createResponse = await request(app)
+        .post('/api/accounts/profile-batch/jobs')
+        .field('accountIds', accountId)
+        .field('firstNameTemplate', '测试{index}')
+        .field('throttlePreset', 'fast')
+        .field('retryLimit', '1');
+
+      expect(createResponse.status).toBe(200);
+      expect(createResponse.body).toHaveProperty('success', true);
+      expect(createResponse.body.data).toHaveProperty('job');
+      expect(createResponse.body.data.job).toHaveProperty('id');
+
+      const jobId = createResponse.body.data.job.id as string;
+
+      const listResponse = await request(app).get('/api/accounts/profile-batch/jobs').query({
+        page: 1,
+        pageSize: 20,
+      });
+      expect(listResponse.status).toBe(200);
+      expect(listResponse.body).toHaveProperty('success', true);
+      expect(Array.isArray(listResponse.body.data.items)).toBe(true);
+
+      const detailResponse = await request(app).get(`/api/accounts/profile-batch/jobs/${jobId}`);
+      expect(detailResponse.status).toBe(200);
+      expect(detailResponse.body).toHaveProperty('success', true);
+      expect(detailResponse.body.data.job).toHaveProperty('id', jobId);
+      expect(Array.isArray(detailResponse.body.data.items)).toBe(true);
+    });
+
+    test('POST /api/accounts/profile-batch/jobs/:id/cancel 应取消未完成批次', async () => {
+      const jobDao = DaoFactory.getInstance().getAccountProfileJobDao();
+      const itemDao = DaoFactory.getInstance().getAccountProfileJobItemDao();
+      const job = jobDao.create({
+        status: 'pending',
+        firstNameTemplate: '待取消{index}',
+        throttlePreset: 'conservative',
+        retryLimit: 1,
+        avatarFiles: [],
+      });
+      itemDao.createMany([
+        {
+          jobId: job.id,
+          accountId,
+          itemIndex: 1,
+          status: 'pending',
+          maxAttempts: 2,
+        },
+      ]);
+
+      const response = await request(app).post(`/api/accounts/profile-batch/jobs/${job.id}/cancel`);
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('success', true);
+      expect(response.body.data.job).toHaveProperty('id', job.id);
+      expect(response.body.data.job).toHaveProperty('status', 'cancelled');
     });
   });
 
@@ -308,6 +420,16 @@ describe('API端点集成测试', () => {
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('success', true);
+    });
+
+    test('GET /api/logs 传无效日期应返回400', async () => {
+      const response = await request(app).get('/api/logs').query({
+        startDate: 'not-a-date',
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toHaveProperty('success', false);
+      expect(response.body.error.message).toContain('startDate');
     });
   });
 
@@ -359,6 +481,21 @@ describe('API端点集成测试', () => {
       });
 
       expect(response.status).toBe(400);
+    });
+
+    test('任务配置无效应该返回400', async () => {
+      const response = await request(app).post('/api/tasks').send({
+        name: '非法任务',
+        type: 'group_posting',
+        accountIds: ['mock-account-id'],
+        targetIds: ['mock-target-id'],
+        config: {
+          interval: 1,
+        },
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toHaveProperty('success', false);
     });
   });
 });

@@ -11,6 +11,24 @@ const router: Router = Router();
 const db = getDatabase();
 const taskService = new TaskService(db);
 
+const mapTaskErrorToAppError = (error: unknown): AppError => {
+  const message = error instanceof Error ? error.message : '任务操作失败';
+
+  if (
+    message.includes('任务预检失败') ||
+    message.includes('不能为空') ||
+    message.includes('格式无效') ||
+    message.includes('无可用账号-目标组合') ||
+    message.includes('strict策略') ||
+    message.includes('无法更新') ||
+    message.includes('发送间隔不能少于10分钟')
+  ) {
+    return new AppError(400, message);
+  }
+
+  return new AppError(500, message);
+};
+
 /**
  * POST /api/tasks
  * 创建任务
@@ -20,13 +38,15 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const taskDto = req.body;
 
-    if (!taskDto.name || !taskDto.type) {
+    if (!taskDto.type) {
       throw new AppError(400, '缺少必需参数');
     }
 
-    logger.info(`创建任务: ${taskDto.name}`);
+    logger.info(`创建任务: ${taskDto.name || taskDto.type}`);
 
-    const task = await taskService.createTask(taskDto);
+    const task = await taskService.createTask(taskDto).catch((error) => {
+      throw mapTaskErrorToAppError(error);
+    });
 
     res.json({
       success: true,
@@ -124,7 +144,9 @@ router.put(
       throw new AppError(404, '任务不存在');
     }
 
-    const task = await taskService.updateTask(id, taskDto);
+    const task = await taskService.updateTask(id, taskDto).catch((error) => {
+      throw mapTaskErrorToAppError(error);
+    });
 
     res.json({
       success: true,
@@ -187,12 +209,15 @@ router.post(
       throw new AppError(404, '任务不存在');
     }
 
-    await taskService.startTask(id);
+    const startResult = await taskService.startTask(id).catch((error) => {
+      throw mapTaskErrorToAppError(error);
+    });
 
     res.json({
       success: true,
       data: {
-        message: '任务启动成功',
+        message: startResult.message,
+        precheck: startResult.precheck,
       },
     });
   })
