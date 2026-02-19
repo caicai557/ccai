@@ -1,4 +1,4 @@
-import { Layout, Menu, theme, Switch, Drawer } from 'antd';
+import { Layout, Menu, theme, Switch, Drawer, Tooltip } from 'antd';
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
@@ -90,8 +90,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children, isDarkMode, onThemeCh
   );
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="app-shell" style={{ minHeight: '100vh' }}>
       <Header
+        className="app-shell__header"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -129,13 +130,17 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children, isDarkMode, onThemeCh
         </div>
         {onThemeChange && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <BulbOutlined style={{ color: 'white' }} />
-            <Switch
-              checked={isDarkMode}
-              onChange={onThemeChange}
-              checkedChildren="深色"
-              unCheckedChildren="浅色"
-            />
+            <Tooltip title="切换浅色/深色模式">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <BulbOutlined style={{ color: 'white' }} />
+                <Switch
+                  checked={isDarkMode}
+                  onChange={onThemeChange}
+                  checkedChildren="深色"
+                  unCheckedChildren="浅色"
+                />
+              </div>
+            </Tooltip>
           </div>
         )}
       </Header>
@@ -165,6 +170,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children, isDarkMode, onThemeCh
 
         <Layout style={{ padding: '16px' }}>
           <Content
+            className="app-shell__content"
             style={{
               padding: 16,
               margin: 0,
@@ -179,6 +185,16 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children, isDarkMode, onThemeCh
       </Layout>
 
       <style>{`
+        .app-shell__header {
+          background: linear-gradient(100deg, #0d3040 0%, #0f4d62 55%, #116869 100%) !important;
+          box-shadow: 0 8px 24px rgba(4, 26, 35, 0.25);
+        }
+        
+        .app-shell__content {
+          box-shadow: 0 10px 30px rgba(15, 45, 49, 0.08);
+          border: 1px solid rgba(13, 122, 111, 0.08);
+        }
+
         /* 桌面端显示侧边栏，隐藏移动菜单图标 */
         @media (min-width: 992px) {
           .desktop-sider {

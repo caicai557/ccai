@@ -54,6 +54,9 @@
 - `PUT /api/targets/:id`
 - `DELETE /api/targets/:id`
 
+目标新增可选字段：
+- `inviteLink`：私有群/频道邀请链接（支持 `https://t.me/+...`、`https://t.me/joinchat/...` 或直接 hash）
+
 ## 2.3 模板
 
 - `POST /api/templates`
@@ -72,6 +75,43 @@
 - `POST /api/tasks/:id/stop`
 - `POST /api/tasks/:id/pause`
 - `GET /api/tasks/:id/history`
+
+任务配置新增字段：
+- `config.autoJoinEnabled`：是否允许启动时自动加入目标，默认 `true`
+- `config.precheckPolicy`：预检策略，`partial` 或 `strict`，默认 `partial`
+
+`POST /api/tasks/:id/start` 响应新增 `precheck` 摘要：
+- `readyPairs`：可执行账号-目标组合
+- `blockedPairs`：不可用组合与原因
+- `blockedReasons`：按失败码聚合计数
+
+示例：
+```json
+{
+  "success": true,
+  "data": {
+    "message": "任务启动成功",
+    "precheck": {
+      "policy": "partial",
+      "autoJoinEnabled": true,
+      "readyPairs": [{ "accountId": "a1", "targetId": "t1", "telegramId": "-100123" }],
+      "blockedPairs": [],
+      "blockedReasons": {}
+    }
+  }
+}
+```
+
+预检/访问失败码：
+- `TARGET_NOT_JOINED`：账号未加入目标
+- `TARGET_JOIN_PENDING`：已提交加入申请，等待审核
+- `TARGET_PRIVATE_NO_INVITE`：私有目标无有效邀请链接
+- `TARGET_WRITE_FORBIDDEN`：目标内无发言权限
+- `TARGET_ACCESS_DENIED`：目标不可访问或不存在
+- `TARGET_JOIN_COOLDOWN`：自动加入冷却中
+- `TARGET_JOIN_FAILED`：自动加入失败
+- `CLIENT_NOT_READY`：账号客户端不可用
+- `UNKNOWN_ERROR`：未知错误
 
 ## 2.5 统计与配置
 
@@ -92,6 +132,20 @@
   - `account_status`
   - `task_status`
   - `new_log`
+
+## 2.7 发现与任务草稿
+
+- `POST /api/discovery/task-drafts` 从已 `accepted` 候选生成任务草稿
+- `GET /api/discovery/task-drafts` 查询草稿（支持 `status/runId/sourceType`）
+- `POST /api/discovery/task-drafts/:id/confirm` 确认草稿并创建正式任务
+- `POST /api/discovery/task-drafts/:id/reject` 拒绝草稿
+- `GET /api/discovery/task-drafts/stats` 草稿每日统计和按来源拒绝统计
+
+默认关闭任务草稿能力，开启方式：
+
+```bash
+export DISCOVERY_TASK_DRAFTS_ENABLED=true
+```
 
 ## 3. 本地开发流程
 

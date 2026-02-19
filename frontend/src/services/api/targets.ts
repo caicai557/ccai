@@ -1,5 +1,5 @@
 import { get, post, put, del } from './client';
-import type { BatchAddTargetsResult, DiscoveredTarget, Target } from '../../types/target';
+import type { Target } from '../../types/target';
 
 /**
  * 目标（群组/频道）API 服务
@@ -47,32 +47,5 @@ export const targetsApi = {
    */
   delete: (id: string): Promise<void> => {
     return del(`/api/targets/${id}`);
-  },
-
-  /**
-   * 搜索当前账号可用群组/频道
-   */
-  search: (params: {
-    accountId: string;
-    keyword?: string;
-    limit?: number;
-  }): Promise<DiscoveredTarget[]> => {
-    return get<{ items: DiscoveredTarget[]; total: number }>('/api/targets/search', params).then(
-      (res) => res.items
-    );
-  },
-
-  /**
-   * 批量添加目标
-   */
-  batchAdd: (items: DiscoveredTarget[]): Promise<BatchAddTargetsResult> => {
-    return post<BatchAddTargetsResult>('/api/targets/batch-add', { items });
-  },
-
-  /**
-   * 获取目标信息（从 Telegram）
-   */
-  getInfo: (identifier: string): Promise<{ title: string; memberCount?: number }> => {
-    return get(`/api/targets/info`, { identifier });
   },
 };

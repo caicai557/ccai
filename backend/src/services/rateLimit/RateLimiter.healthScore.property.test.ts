@@ -39,6 +39,9 @@ describe('RateLimiter Property Tests - 健康度评分计算', () => {
         last_name TEXT,
         add_method TEXT,
         status TEXT NOT NULL CHECK(status IN ('online', 'offline', 'restricted')),
+        pool_status TEXT NOT NULL DEFAULT 'ok'
+          CHECK(pool_status IN ('ok', 'error', 'banned', 'cooldown')),
+        pool_status_updated_at TEXT NOT NULL,
         health_score INTEGER DEFAULT 100,
         last_active TEXT,
         created_at TEXT NOT NULL,

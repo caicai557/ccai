@@ -39,7 +39,7 @@ print_process_status() {
 }
 
 print_process_status "后端" "$backend_pid_file" "3000"
-print_process_status "前端" "$frontend_pid_file" "5173"
+print_process_status "前端" "$frontend_pid_file" "5174"
 
 if curl -sS -m 3 "http://127.0.0.1:3000/health" >/dev/null 2>&1; then
   echo "[dev-status] 后端健康检查: 正常"

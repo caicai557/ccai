@@ -41,6 +41,19 @@ kill_port_processes() {
   fi
 }
 
+start_detached() {
+  local log_file="$1"
+  shift
+
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid "$@" >"$log_file" 2>&1 < /dev/null &
+  else
+    nohup "$@" >"$log_file" 2>&1 < /dev/null &
+  fi
+
+  echo $!
+}
+
 read_pid() {
   local pid_file="$1"
   if [[ -f "$pid_file" ]]; then
@@ -67,16 +80,13 @@ start_backend() {
     return
   fi
 
-  if [[ ! -f "$ROOT_DIR/backend/dist/index.js" ]]; then
-    echo "[dev-up] 后端构建产物不存在，先构建..."
-    (cd "$ROOT_DIR" && pnpm --filter @telegram-manager/backend build)
-  fi
+  echo "[dev-up] 构建后端..."
+  (cd "$ROOT_DIR" && pnpm --filter @telegram-manager/backend build)
 
   echo "[dev-up] 启动后端..."
   (
     cd "$ROOT_DIR" || exit 1
-    nohup pnpm --filter @telegram-manager/backend start >"$backend_log_file" 2>&1 &
-    echo $! >"$backend_pid_file"
+    start_detached "$backend_log_file" node "$ROOT_DIR/backend/dist/index.js" >"$backend_pid_file"
   )
 
   sleep 2
@@ -91,8 +101,8 @@ start_backend() {
 
 start_frontend() {
   local pid
-  if is_port_listening 5173; then
-    echo "[dev-up] 前端端口 5173 已监听，跳过启动"
+  if is_port_listening 5174; then
+    echo "[dev-up] 前端端口 5174 已监听，跳过启动"
     return
   fi
 
@@ -104,14 +114,13 @@ start_frontend() {
 
   echo "[dev-up] 启动前端..."
   (
-    cd "$ROOT_DIR" || exit 1
-    nohup pnpm --filter @telegram-manager/frontend dev -- --host 127.0.0.1 --port 5173 --strictPort >"$frontend_log_file" 2>&1 &
-    echo $! >"$frontend_pid_file"
+    cd "$ROOT_DIR/frontend" || exit 1
+    start_detached "$frontend_log_file" pnpm vite --host 127.0.0.1 --port 5174 --strictPort >"$frontend_pid_file"
   )
 
   sleep 2
   pid="$(read_pid "$frontend_pid_file")"
-  if ! is_running "$pid" && ! is_port_listening 5173; then
+  if ! is_running "$pid" && ! is_port_listening 5174; then
     echo "[dev-up] 前端启动失败，日志:"
     tail -n 80 "$frontend_log_file" || true
     exit 1
@@ -123,6 +132,6 @@ start_backend
 start_frontend
 
 echo "[dev-up] 完成"
-echo "[dev-up] 前端: http://localhost:5173"
+echo "[dev-up] 前端: http://localhost:5174"
 echo "[dev-up] 后端: http://localhost:3000"
 echo "[dev-up] 查看状态: pnpm dev:status"

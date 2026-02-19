@@ -4,16 +4,35 @@
   box-sizing: border-box;
 }
 
+:root {
+  --app-bg-top: #eef6f6;
+  --app-bg-middle: #f7fbfb;
+  --app-bg-bottom: #f4f7fa;
+  --card-shadow: 0 10px 24px rgba(17, 46, 53, 0.08);
+}
+
 body {
   font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell',
-    'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    'PingFang SC', 'Microsoft YaHei', 'Segoe UI', 'Helvetica Neue', 'Noto Sans SC', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(
+    180deg,
+    var(--app-bg-top) 0%,
+    var(--app-bg-middle) 40%,
+    var(--app-bg-bottom) 100%
+  );
 }
 
 #root {
   min-height: 100vh;
+}
+
+.ant-card,
+.ant-table-wrapper,
+.ant-tabs-content-holder,
+.ant-modal-content {
+  box-shadow: var(--card-shadow);
 }
 
 /* 响应式布局优化 */
@@ -21,6 +40,17 @@ body {
 /* 确保表格在小屏幕上可以横向滚动 */
 .ant-table-wrapper {
   overflow-x: auto;
+}
+
+.ant-btn:not(.ant-btn-link) {
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.ant-btn:not(.ant-btn-link):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 12px rgba(8, 68, 64, 0.14);
 }
 
 /* 优化表格在移动设备上的显示 */
@@ -37,6 +67,10 @@ body {
   .ant-btn {
     padding: 4px 8px;
     font-size: 12px;
+  }
+
+  .ant-space {
+    gap: 6px !important;
   }
 }
 
@@ -146,5 +180,86 @@ body {
 
   .ant-steps-item-description {
     font-size: 11px;
+  }
+}
+
+/* 任务页：专业控制台风格 */
+.task-page__metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.task-page__metrics .ant-card {
+  margin-bottom: 0;
+}
+
+.task-page__metrics .ant-statistic-title {
+  font-size: 12px;
+}
+
+.task-page__metrics .ant-statistic-content {
+  font-size: 20px;
+}
+
+.task-page__filters {
+  margin-bottom: 10px;
+  border: 1px solid rgba(13, 122, 111, 0.12);
+}
+
+.task-page__table .ant-table-thead > tr > th {
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.task-page__table .ant-table-tbody > tr > td {
+  padding: 10px 12px;
+}
+
+.task-row-actions {
+  flex-wrap: nowrap !important;
+}
+
+.task-row-actions .ant-btn {
+  min-width: 62px;
+}
+
+/* 任务创建向导 */
+.task-form__steps {
+  margin-bottom: 16px;
+}
+
+.task-form__content {
+  min-height: 420px;
+}
+
+@media (max-width: 1200px) {
+  .task-page__metrics {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .task-page__metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .task-page__filters .ant-space {
+    width: 100%;
+  }
+
+  .task-page__filters .ant-input,
+  .task-page__filters .ant-select,
+  .task-page__filters .ant-btn {
+    width: 100% !important;
+  }
+
+  .task-row-actions {
+    gap: 6px !important;
+  }
+
+  .task-form__content {
+    min-height: auto;
   }
 }

@@ -1,5 +1,12 @@
-import { get, post, del, download, upload } from './client';
-import type { Account } from '../../types/account';
+import { get, post, del, download, upload, apiClient } from './client';
+import type {
+  Account,
+  AccountPoolStatus,
+  AccountProfileBatchJob,
+  AccountProfileBatchJobItem,
+  AccountProfileBatchJobStatus,
+  AccountProfileThrottlePreset,
+} from '../../types/account';
 
 /**
  * 账号 API 服务
@@ -8,8 +15,10 @@ export const accountsApi = {
   /**
    * 获取所有账号
    */
-  getAll: (): Promise<Account[]> => {
-    return get<{ accounts: Account[]; total: number }>('/api/accounts').then((res) => res.accounts);
+  getAll: (params?: { poolStatus?: AccountPoolStatus }): Promise<Account[]> => {
+    return get<{ accounts: Account[]; total: number }>('/api/accounts', params).then(
+      (res) => res.accounts
+    );
   },
 
   /**
@@ -88,5 +97,92 @@ export const accountsApi = {
         healthScore: res.isAuthorized ? 100 : 0,
       })
     );
+  },
+
+  /**
+   * 手动更新账号池状态
+   */
+  updatePoolStatus: (id: string, poolStatus: AccountPoolStatus): Promise<Account> => {
+    return post<{ account: Account; message: string }>(`/api/accounts/${id}/pool-status`, {
+      poolStatus,
+    }).then((res) => res.account);
+  },
+
+  createProfileBatchJob: (payload: {
+    accountIds: string[];
+    firstNameTemplate?: string;
+    lastNameTemplate?: string;
+    bioTemplate?: string;
+    avatarFiles?: File[];
+    throttlePreset?: AccountProfileThrottlePreset;
+    retryLimit?: number;
+  }): Promise<AccountProfileBatchJob> => {
+    const formData = new FormData();
+    payload.accountIds.forEach((accountId) => {
+      formData.append('accountIds', accountId);
+    });
+    if (payload.firstNameTemplate) {
+      formData.append('firstNameTemplate', payload.firstNameTemplate);
+    }
+    if (payload.lastNameTemplate) {
+      formData.append('lastNameTemplate', payload.lastNameTemplate);
+    }
+    if (payload.bioTemplate) {
+      formData.append('bioTemplate', payload.bioTemplate);
+    }
+    if (payload.throttlePreset) {
+      formData.append('throttlePreset', payload.throttlePreset);
+    }
+    if (payload.retryLimit !== undefined) {
+      formData.append('retryLimit', String(payload.retryLimit));
+    }
+    payload.avatarFiles?.forEach((file) => {
+      formData.append('avatarFiles', file);
+    });
+
+    return apiClient
+      .post<{
+        success: boolean;
+        data: { job: AccountProfileBatchJob };
+      }>('/api/accounts/profile-batch/jobs', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      })
+      .then((res) => res.data.data.job);
+  },
+
+  listProfileBatchJobs: (params?: {
+    status?: AccountProfileBatchJobStatus;
+    page?: number;
+    pageSize?: number;
+  }): Promise<{
+    items: AccountProfileBatchJob[];
+    total: number;
+    page: number;
+    pageSize: number;
+  }> => {
+    return get<{
+      items: AccountProfileBatchJob[];
+      total: number;
+      page: number;
+      pageSize: number;
+    }>('/api/accounts/profile-batch/jobs', params);
+  },
+
+  getProfileBatchJobDetail: (id: string): Promise<{
+    job: AccountProfileBatchJob;
+    items: AccountProfileBatchJobItem[];
+  }> => {
+    return get<{
+      job: AccountProfileBatchJob;
+      items: AccountProfileBatchJobItem[];
+    }>(`/api/accounts/profile-batch/jobs/${id}`);
+  },
+
+  cancelProfileBatchJob: (id: string): Promise<AccountProfileBatchJob> => {
+    return post<{ job: AccountProfileBatchJob; message: string }>(
+      `/api/accounts/profile-batch/jobs/${id}/cancel`
+    ).then((res) => res.job);
   },
 };

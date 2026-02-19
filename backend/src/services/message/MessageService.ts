@@ -1,8 +1,11 @@
 import Database from 'better-sqlite3';
+import { NewMessage as GramNewMessage } from 'telegram/events';
 import { ClientPool } from '../../telegram/ClientPool';
 import { RateLimiter } from '../rateLimit/RateLimiter';
 import { MessageHistoryDao } from '../../database/dao/MessageHistoryDao';
+import { AccountDao } from '../../database/dao/AccountDao';
 import { logger } from '../../utils/logger';
+import { AccountPoolStatus } from '../../types';
 
 /**
  * 发送消息参数
@@ -60,6 +63,7 @@ export interface NewMessage {
   content: string;
   senderId: string;
   sentAt: Date;
+  commentEnabled?: boolean;
 }
 
 /**
@@ -80,12 +84,17 @@ export class MessageService {
   private clientPool: ClientPool;
   private rateLimiter: RateLimiter;
   private messageHistoryDao: MessageHistoryDao;
+  private accountDao: AccountDao;
   private listeners: Map<string, ChannelListener> = new Map();
+  private readonly channelPollIntervalMs: number = 15_000;
+  private readonly channelPollFetchLimit: number = 5;
+  private readonly maxTrackedMessageIds: number = 200;
 
   constructor(db: Database.Database, rateLimiter?: RateLimiter) {
     this.clientPool = ClientPool.getInstance();
     this.rateLimiter = rateLimiter || new RateLimiter(db);
     this.messageHistoryDao = new MessageHistoryDao(db);
+    this.accountDao = new AccountDao(db);
   }
 
   /**
@@ -100,6 +109,10 @@ export class MessageService {
       if (!canSend) {
         const rateStatus = await this.rateLimiter.getRateStatus(accountId);
         logger.warn(`账号 ${accountId} 速率限制中，下次可用时间: ${rateStatus.nextAvailableAt}`);
+
+        if (rateStatus.isFloodWaiting) {
+          this.safeUpdatePoolStatus(accountId, 'cooldown');
+        }
 
         const sendError: SendError = {
           code: 'RATE_LIMIT_EXCEEDED',
@@ -204,6 +217,11 @@ export class MessageService {
       if (sendError.isFloodWait && sendError.waitSeconds) {
         await this.rateLimiter.handleFloodWait(accountId, sendError.waitSeconds);
         logger.warn(`账号 ${accountId} 触发FloodWait，等待 ${sendError.waitSeconds} 秒`);
+      } else {
+        const nextPoolStatus = this.resolvePoolStatusFromError(error, sendError);
+        if (nextPoolStatus) {
+          this.safeUpdatePoolStatus(accountId, nextPoolStatus);
+        }
       }
 
       return {
@@ -226,6 +244,10 @@ export class MessageService {
       if (!canSend) {
         const rateStatus = await this.rateLimiter.getRateStatus(accountId);
         logger.warn(`账号 ${accountId} 速率限制中，下次可用时间: ${rateStatus.nextAvailableAt}`);
+
+        if (rateStatus.isFloodWaiting) {
+          this.safeUpdatePoolStatus(accountId, 'cooldown');
+        }
 
         const sendError: SendError = {
           code: 'RATE_LIMIT_EXCEEDED',
@@ -289,6 +311,7 @@ export class MessageService {
 
       // 发送评论（回复消息）
       const result = await client.sendComment(channelId, messageId, content);
+      const sentMessageId = this.extractResultMessageId(result);
 
       // 记录发送操作
       await this.rateLimiter.recordSend(accountId);
@@ -309,7 +332,7 @@ export class MessageService {
 
       return {
         success: true,
-        messageId: result.id,
+        messageId: sentMessageId,
         sentAt: new Date(),
       };
     } catch (error: any) {
@@ -330,6 +353,11 @@ export class MessageService {
       if (sendError.isFloodWait && sendError.waitSeconds) {
         await this.rateLimiter.handleFloodWait(accountId, sendError.waitSeconds);
         logger.warn(`账号 ${accountId} 触发FloodWait，等待 ${sendError.waitSeconds} 秒`);
+      } else {
+        const nextPoolStatus = this.resolvePoolStatusFromError(error, sendError);
+        if (nextPoolStatus) {
+          this.safeUpdatePoolStatus(accountId, nextPoolStatus);
+        }
       }
 
       return {
@@ -349,6 +377,7 @@ export class MessageService {
     callback: MessageCallback
   ): Promise<void> {
     const listenerKey = `${accountId}:${channelId}`;
+    const normalizedTargetId = this.normalizePeerId(channelId);
 
     // 如果已经在监听，先停止
     if (this.listeners.has(listenerKey)) {
@@ -369,36 +398,103 @@ export class MessageService {
 
       // 获取原始 TelegramClient
       const rawClient = client.getRawClient();
+      const lookupChannelId = this.toChannelLookupId(channelId);
+      let latestKnownMessageId = await this.getLatestMessageId(rawClient, lookupChannelId);
+      const processedMessageIds: Set<number> = new Set();
+
+      const trimProcessedMessages = (): void => {
+        while (processedMessageIds.size > this.maxTrackedMessageIds) {
+          const oldestId = processedMessageIds.values().next().value;
+          if (oldestId === undefined) {
+            break;
+          }
+          processedMessageIds.delete(oldestId);
+        }
+      };
+
+      const dispatchMessage = async (
+        message: any,
+        source: 'event' | 'poll',
+        event?: any
+      ): Promise<void> => {
+        if (!message) {
+          return;
+        }
+
+        const chatId = event
+          ? this.extractChannelIdFromEvent(event)
+          : this.extractChannelIdFromMessage(message);
+        if (!chatId) {
+          logger.debug(
+            `频道监听忽略消息（无法提取频道ID）: account=${accountId}, target=${normalizedTargetId}, source=${source}`
+          );
+          return;
+        }
+
+        if (chatId !== normalizedTargetId) {
+          logger.debug(
+            `频道监听忽略消息（频道不匹配）: account=${accountId}, source=${chatId}, target=${normalizedTargetId}, message=${message.id}, via=${source}`
+          );
+          return;
+        }
+
+        const messageId = Number(message.id);
+        if (!Number.isFinite(messageId) || messageId <= 0) {
+          logger.debug(
+            `频道监听忽略消息（消息ID无效）: account=${accountId}, channel=${chatId}, rawId=${message.id}, via=${source}`
+          );
+          return;
+        }
+
+        if (messageId <= latestKnownMessageId || processedMessageIds.has(messageId)) {
+          return;
+        }
+
+        latestKnownMessageId = Math.max(latestKnownMessageId, messageId);
+        processedMessageIds.add(messageId);
+        trimProcessedMessages();
+
+        const newMessage: NewMessage = {
+          id: messageId,
+          channelId: normalizedTargetId,
+          content: String(message.message || ''),
+          senderId: message.senderId?.toString() || '',
+          sentAt: this.parseMessageDate(message.date),
+          commentEnabled: this.resolveCommentAvailability(message),
+        };
+
+        logger.info(
+          `收到频道新消息: account=${accountId}, channel=${normalizedTargetId}, message=${messageId}, via=${source}`
+        );
+        await callback(newMessage);
+      };
 
       // 创建事件处理器
       const eventHandler = async (event: any) => {
         try {
-          const message = event.message;
-          if (!message) return;
-
-          // 获取消息所属的频道ID
-          const chatId = message.chatId?.toString();
-          if (chatId !== channelId) return;
-
-          // 构造新消息对象
-          const newMessage: NewMessage = {
-            id: message.id,
-            channelId: chatId,
-            content: message.message || '',
-            senderId: message.senderId?.toString() || '',
-            sentAt: new Date(message.date * 1000),
-          };
-
-          // 调用回调函数
-          await callback(newMessage);
+          await dispatchMessage(event?.message, 'event', event);
         } catch (error) {
           logger.error(`处理新消息失败: ${accountId}:${channelId}`, error);
         }
       };
 
-      // 添加事件监听器
-      // 注意：这里简化实现，实际使用时需要根据 GramJS 的 NewMessage 事件
-      rawClient.addEventHandler(eventHandler);
+      // 添加实时事件监听器
+      const eventBuilder = new GramNewMessage({});
+      rawClient.addEventHandler(eventHandler, eventBuilder);
+
+      // 轮询兜底：防止某些环境下事件漏触发
+      const pollTimer = setInterval(() => {
+        void (async () => {
+          try {
+            const recentMessages = await this.getRecentMessages(rawClient, lookupChannelId);
+            for (const message of recentMessages) {
+              await dispatchMessage(message, 'poll');
+            }
+          } catch (error) {
+            logger.error(`频道轮询失败: ${accountId}:${channelId}`, error);
+          }
+        })();
+      }, this.channelPollIntervalMs);
 
       // 保存监听器信息（包含原始客户端引用以便后续移除）
       this.listeners.set(listenerKey, {
@@ -406,11 +502,9 @@ export class MessageService {
         channelId,
         callback,
         removeHandler: () => {
-          // 移除事件处理器
-          // 注意：GramJS 的 removeEventHandler 可能需要不同的参数
-          // 这里提供一个占位实现，实际使用时需要根据 GramJS API 调整
           try {
-            // 简化实现：直接从监听器列表中移除
+            clearInterval(pollTimer);
+            rawClient.removeEventHandler(eventHandler, eventBuilder);
             logger.debug(`移除事件处理器: ${accountId}:${channelId}`);
           } catch (error) {
             logger.error(`移除事件处理器失败: ${accountId}:${channelId}`, error);
@@ -418,10 +512,146 @@ export class MessageService {
         },
       });
 
-      logger.info(`✅ 开始监听频道: ${accountId} -> ${channelId}`);
+      logger.info(
+        `✅ 开始监听频道: ${accountId} -> ${channelId} (实时事件 + ${this.channelPollIntervalMs / 1000}s轮询兜底, baseline=${latestKnownMessageId})`
+      );
     } catch (error) {
       logger.error(`监听频道失败: ${accountId} -> ${channelId}`, error);
       throw error;
+    }
+  }
+
+  private normalizePeerId(peerId: unknown): string {
+    if (peerId === null || peerId === undefined) {
+      return '';
+    }
+
+    const raw = String(peerId).trim();
+    if (!raw) {
+      return '';
+    }
+
+    // 频道消息事件常见为 -100xxxxxxxxxx，目标配置通常是 xxxxxxxxxx
+    const withoutChannelPrefix = raw.replace(/^-100/, '');
+    return withoutChannelPrefix.replace(/^-/, '');
+  }
+
+  private extractChannelIdFromEvent(event: any): string {
+    const candidates: unknown[] = [
+      event?.chatId,
+      event?.message?.chatId,
+      event?.originalUpdate?.message?.chatId,
+      event?.message?.peerId?.channelId,
+      event?.message?.peerId?.chatId,
+      event?.originalUpdate?.message?.peerId?.channelId,
+      event?.originalUpdate?.message?.peerId?.chatId,
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizePeerId(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return '';
+  }
+
+  private extractChannelIdFromMessage(message: any): string {
+    const candidates: unknown[] = [
+      message?.chatId,
+      message?.peerId?.channelId,
+      message?.peerId?.chatId,
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizePeerId(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return '';
+  }
+
+  private parseMessageDate(rawDate: unknown): Date {
+    if (rawDate instanceof Date) {
+      return rawDate;
+    }
+
+    if (typeof rawDate === 'number' && Number.isFinite(rawDate)) {
+      return new Date(rawDate * 1000);
+    }
+
+    if (typeof rawDate === 'string' && rawDate.trim()) {
+      const parsed = new Date(rawDate);
+      if (!isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+
+    return new Date();
+  }
+
+  /**
+   * 仅在字段明确可判定时返回 true/false，避免缺失字段被误判为 false。
+   */
+  private resolveCommentAvailability(message: any): boolean | undefined {
+    const replies = message?.replies;
+    if (!replies || typeof replies !== 'object') {
+      return undefined;
+    }
+
+    const commentsFlag = (replies as { comments?: unknown }).comments;
+    if (typeof commentsFlag === 'boolean') {
+      return commentsFlag;
+    }
+
+    return undefined;
+  }
+
+  private toChannelLookupId(channelId: string): string {
+    const normalized = this.normalizePeerId(channelId);
+    if (!normalized) {
+      return channelId;
+    }
+    return `-100${normalized}`;
+  }
+
+  private async getLatestMessageId(rawClient: any, lookupChannelId: string): Promise<number> {
+    try {
+      const recentMessages = await rawClient.getMessages(lookupChannelId, { limit: 1 });
+      const normalized = this.normalizeMessageList(recentMessages);
+      const latestId = Number(normalized[0]?.id || 0);
+      return Number.isFinite(latestId) ? latestId : 0;
+    } catch (error) {
+      logger.warn(`初始化监听基线失败，回退到0: channel=${lookupChannelId}`, error);
+      return 0;
+    }
+  }
+
+  private async getRecentMessages(rawClient: any, lookupChannelId: string): Promise<any[]> {
+    const recentMessages = await rawClient.getMessages(lookupChannelId, {
+      limit: this.channelPollFetchLimit,
+    });
+    return this.normalizeMessageList(recentMessages)
+      .filter((message) => message && message.id !== undefined && message.id !== null)
+      .sort((left, right) => Number(left.id) - Number(right.id));
+  }
+
+  private normalizeMessageList(rawMessages: any): any[] {
+    if (!rawMessages) {
+      return [];
+    }
+
+    if (Array.isArray(rawMessages)) {
+      return rawMessages;
+    }
+
+    try {
+      return Array.from(rawMessages);
+    } catch (_error) {
+      return [];
     }
   }
 
@@ -466,10 +696,12 @@ export class MessageService {
    * 解析错误
    */
   private parseError(error: any): SendError {
+    const errorMessage = this.extractErrorMessage(error);
+
     // FloodWait错误
-    if (error.errorMessage && error.errorMessage.includes('FLOOD_WAIT')) {
-      const match = error.errorMessage.match(/FLOOD_WAIT_(\d+)/);
-      const waitSeconds = match ? parseInt(match[1], 10) : 60;
+    if (errorMessage.includes('FLOOD_WAIT')) {
+      const match = errorMessage.match(/FLOOD_WAIT_(\d+)/);
+      const waitSeconds = parseInt(match?.[1] || '60', 10);
 
       return {
         code: 'FLOOD_WAIT',
@@ -482,14 +714,24 @@ export class MessageService {
 
     // 权限错误
     if (
-      error.errorMessage &&
-      (error.errorMessage.includes('CHAT_WRITE_FORBIDDEN') ||
-        error.errorMessage.includes('USER_BANNED_IN_CHANNEL') ||
-        error.errorMessage.includes('CHANNEL_PRIVATE'))
+      errorMessage.includes('CHAT_WRITE_FORBIDDEN') ||
+      errorMessage.includes('CHAT_ADMIN_REQUIRED') ||
+      errorMessage.includes('USER_BANNED_IN_CHANNEL') ||
+      errorMessage.includes('CHANNEL_PRIVATE')
     ) {
       return {
         code: 'PERMISSION_DENIED',
         message: '没有权限发送消息',
+        isFloodWait: false,
+        isRetryable: false,
+      };
+    }
+
+    // 频道消息未开启评论（或消息无法作为评论锚点）
+    if (errorMessage.includes('MSG_ID_INVALID')) {
+      return {
+        code: 'COMMENT_NOT_AVAILABLE',
+        message: '该消息未开启评论或无法评论',
         isFloodWait: false,
         isRetryable: false,
       };
@@ -500,8 +742,8 @@ export class MessageService {
       error.code === 'ECONNRESET' ||
       error.code === 'ETIMEDOUT' ||
       error.code === 'ENOTFOUND' ||
-      error.message?.includes('network') ||
-      error.message?.includes('timeout')
+      errorMessage.includes('network') ||
+      errorMessage.includes('timeout')
     ) {
       return {
         code: 'NETWORK_ERROR',
@@ -514,10 +756,84 @@ export class MessageService {
     // 未知错误
     return {
       code: 'UNKNOWN_ERROR',
-      message: error.message || '未知错误',
+      message: errorMessage || '未知错误',
       isFloodWait: false,
       isRetryable: false,
     };
+  }
+
+  private extractErrorMessage(error: any): string {
+    if (!error) {
+      return '';
+    }
+
+    if (typeof error.errorMessage === 'string' && error.errorMessage.trim()) {
+      return error.errorMessage;
+    }
+
+    if (typeof error.message === 'string' && error.message.trim()) {
+      return error.message;
+    }
+
+    return '';
+  }
+
+  private extractResultMessageId(result: any): number | undefined {
+    const directId = Number(result?.id);
+    if (Number.isFinite(directId) && directId > 0) {
+      return directId;
+    }
+
+    const updates = Array.isArray(result?.updates) ? result.updates : [];
+    for (const update of updates) {
+      const updateMessageId = Number(update?.message?.id);
+      if (Number.isFinite(updateMessageId) && updateMessageId > 0) {
+        return updateMessageId;
+      }
+    }
+
+    return undefined;
+  }
+
+  private resolvePoolStatusFromError(
+    error: any,
+    sendError: SendError
+  ): AccountPoolStatus | undefined {
+    const rawMessage = this.extractErrorMessage(error).toUpperCase();
+
+    if (
+      rawMessage.includes('USER_DEACTIVATED') ||
+      rawMessage.includes('AUTH_KEY_UNREGISTERED') ||
+      rawMessage.includes('PHONE_NUMBER_BANNED')
+    ) {
+      return 'banned';
+    }
+
+    if (sendError.code === 'NETWORK_ERROR' || sendError.code === 'CLIENT_NOT_FOUND') {
+      return 'error';
+    }
+
+    if (sendError.code === 'UNKNOWN_ERROR' || sendError.code === 'PERMISSION_DENIED') {
+      return 'error';
+    }
+
+    return undefined;
+  }
+
+  private safeUpdatePoolStatus(accountId: string, status: AccountPoolStatus): void {
+    const account = this.accountDao.findById(accountId);
+    if (!account) {
+      return;
+    }
+
+    // banned 只允许人工恢复，避免被自动逻辑误覆盖。
+    if (account.poolStatus === 'banned' && status !== 'banned') {
+      return;
+    }
+
+    if (account.poolStatus !== status) {
+      this.accountDao.updatePoolStatus(accountId, status);
+    }
   }
 
   private recordFailedHistory(params: {

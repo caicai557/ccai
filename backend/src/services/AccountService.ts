@@ -3,8 +3,15 @@ import { TelegramClientWrapper } from '../telegram/TelegramClientWrapper';
 import { ClientPool } from '../telegram/ClientPool';
 import { SessionManager } from '../telegram/SessionManager';
 import { logger } from '../utils/logger';
-import { Account } from '../types';
+import { Account, AccountPoolStatus } from '../types';
 import { wsManager } from '../routes/ws';
+import { StringSession } from 'telegram/sessions';
+import { AuthKey } from 'telegram/crypto/AuthKey';
+import { getTelegramConfig } from '../config';
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 /**
  * 账号服务
@@ -13,6 +20,7 @@ export class AccountService {
   private accountDao = DaoFactory.getInstance().getAccountDao();
   private clientPool = ClientPool.getInstance();
   private sessionManager = SessionManager.getInstance();
+  private readonly sqliteSessionMagic = Buffer.from('SQLite format 3\0', 'ascii');
 
   /**
    * 添加账号（开始登录流程）
@@ -24,17 +32,21 @@ export class AccountService {
       throw new Error('该手机号已添加');
     }
 
+    // 启动登录流程前先校验 Telegram 凭证，避免创建脏账号记录
+    getTelegramConfig();
+
     // 创建临时账号记录
     const tempAccount = this.accountDao.create({
       phoneNumber,
       session: '',
       status: 'offline',
     });
-
-    // 创建Telegram客户端
-    const client = new TelegramClientWrapper(tempAccount.id, phoneNumber);
+    let client: TelegramClientWrapper | null = null;
 
     try {
+      // 创建Telegram客户端
+      client = new TelegramClientWrapper(tempAccount.id, phoneNumber);
+
       // 发送验证码
       const phoneCodeHash = await client.sendCode();
 
@@ -49,6 +61,9 @@ export class AccountService {
       };
     } catch (error) {
       // 如果失败，删除临时账号
+      if (client) {
+        await client.disconnect();
+      }
       this.accountDao.delete(tempAccount.id);
       throw error;
     }
@@ -145,25 +160,18 @@ export class AccountService {
   async importAccountFromSession(sessionFile: Buffer, _filename: string): Promise<Account> {
     try {
       // 解析会话文件内容
-      const sessionString = sessionFile.toString('utf-8').trim();
-
-      if (!sessionString) {
-        throw new Error('会话文件内容为空');
-      }
-
-      // 验证会话字符串格式（GramJS StringSession 格式）
-      if (!sessionString.startsWith('1') || sessionString.length < 100) {
-        throw new Error('无效的会话文件格式');
-      }
+      const sessionString = await this.parseSessionStringFromFile(sessionFile);
 
       // 创建临时客户端来验证会话
       const tempAccountId = `temp_${Date.now()}`;
       const tempClient = new TelegramClientWrapper(tempAccountId, '', sessionString);
+      let importedClient: TelegramClientWrapper | null = null;
+      let createdAccount: Account | null = null;
 
       try {
         // 连接并验证会话
         await tempClient.connect();
-        const isValid = await tempClient.validateSession();
+        const isValid = await tempClient.isUserAuthorized();
 
         if (!isValid) {
           throw new Error('会话已失效或无效');
@@ -182,11 +190,8 @@ export class AccountService {
           throw new Error('该手机号已添加');
         }
 
-        // 保存会话
-        await tempClient.saveSession();
-
         // 创建账号记录
-        const account = this.accountDao.create({
+        createdAccount = this.accountDao.create({
           phoneNumber: me.phone,
           username: me.username || undefined,
           firstName: me.firstName || undefined,
@@ -197,16 +202,32 @@ export class AccountService {
         });
 
         // 更新账号ID并重新保存会话
-        const client = new TelegramClientWrapper(account.id, me.phone, sessionString);
-        await client.connect();
-        await client.saveSession();
+        importedClient = new TelegramClientWrapper(createdAccount.id, me.phone, sessionString);
+        await importedClient.connect();
+
+        const isAuthorizedAfterImport = await importedClient.isUserAuthorized();
+        if (!isAuthorizedAfterImport) {
+          throw new Error('会话导入后授权验证失败');
+        }
+
+        await importedClient.saveSession();
 
         // 添加到连接池
-        this.clientPool.addClient(account.id, client);
+        this.clientPool.addClient(createdAccount.id, importedClient);
 
         logger.info(`✅ 账号已从会话文件导入: ${me.phone}`);
 
-        return this.accountDao.findById(account.id)!;
+        return this.accountDao.findById(createdAccount.id)!;
+      } catch (error) {
+        // 回滚已创建的资源，避免产生脏账号数据
+        if (importedClient) {
+          await importedClient.disconnect();
+        }
+        if (createdAccount) {
+          await this.clientPool.removeClient(createdAccount.id);
+          this.accountDao.delete(createdAccount.id);
+        }
+        throw error;
       } finally {
         // 清理临时客户端
         await tempClient.disconnect();
@@ -214,6 +235,104 @@ export class AccountService {
     } catch (error) {
       logger.error('导入会话文件失败', error);
       throw new Error(`导入会话文件失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  /**
+   * 从上传文件中解析 GramJS StringSession
+   * 兼容纯文本 StringSession 与 Telethon SQLite .session 文件
+   */
+  private async parseSessionStringFromFile(sessionFile: Buffer): Promise<string> {
+    if (!sessionFile || sessionFile.length === 0) {
+      throw new Error('会话文件内容为空');
+    }
+
+    if (
+      sessionFile.length >= this.sqliteSessionMagic.length &&
+      sessionFile.subarray(0, this.sqliteSessionMagic.length).equals(this.sqliteSessionMagic)
+    ) {
+      return this.convertTelethonSqliteSession(sessionFile);
+    }
+
+    const sessionString = sessionFile
+      .toString('utf-8')
+      .trim()
+      .replace(/^['"]|['"]$/g, '');
+
+    if (!sessionString) {
+      throw new Error('会话文件内容为空');
+    }
+
+    try {
+      new StringSession(sessionString);
+      return sessionString;
+    } catch {
+      throw new Error('无效的会话文件格式');
+    }
+  }
+
+  /**
+   * 将 Telethon SQLite .session 转换为 GramJS StringSession
+   */
+  private async convertTelethonSqliteSession(sessionFile: Buffer): Promise<string> {
+    const tempSessionPath = path.join(
+      os.tmpdir(),
+      `telethon-session-${Date.now()}-${Math.random().toString(16).slice(2)}.session`
+    );
+    let db: Database.Database | null = null;
+
+    try {
+      fs.writeFileSync(tempSessionPath, sessionFile);
+      db = new Database(tempSessionPath, { readonly: true, fileMustExist: true });
+
+      const row = db
+        .prepare(
+          `
+          SELECT
+            dc_id AS dcId,
+            server_address AS serverAddress,
+            port,
+            auth_key AS authKey
+          FROM sessions
+          WHERE auth_key IS NOT NULL AND length(auth_key) > 0
+          ORDER BY dc_id DESC
+          LIMIT 1
+        `
+        )
+        .get() as
+        | {
+            dcId: number;
+            serverAddress: string;
+            port: number;
+            authKey: Buffer | Uint8Array;
+          }
+        | undefined;
+
+      if (!row || !row.authKey || !row.serverAddress || !row.port) {
+        throw new Error('会话文件缺少有效的 sessions 记录');
+      }
+
+      const stringSession = new StringSession('');
+      stringSession.setDC(Number(row.dcId), String(row.serverAddress), Number(row.port));
+
+      const authKey = new AuthKey();
+      await authKey.setKey(Buffer.from(row.authKey));
+      stringSession.setAuthKey(authKey, Number(row.dcId));
+
+      const convertedSession = stringSession.save();
+      if (!convertedSession || !convertedSession.startsWith('1')) {
+        throw new Error('会话文件转换失败');
+      }
+
+      return convertedSession;
+    } catch (error) {
+      logger.warn('SQLite会话文件转换失败', error);
+      throw new Error('无效的会话文件格式');
+    } finally {
+      if (db) {
+        db.close();
+      }
+      fs.rmSync(tempSessionPath, { force: true });
     }
   }
 
@@ -249,15 +368,15 @@ export class AccountService {
   /**
    * 获取账号列表
    */
-  async getAccounts(): Promise<Account[]> {
-    return this.accountDao.findAll();
+  async getAccounts(poolStatus?: AccountPoolStatus): Promise<Account[]> {
+    return this.accountDao.findAll(poolStatus);
   }
 
   /**
    * 获取所有账号（别名方法，符合设计文档接口）
    */
-  async getAllAccounts(): Promise<Account[]> {
-    return this.accountDao.findAll();
+  async getAllAccounts(poolStatus?: AccountPoolStatus): Promise<Account[]> {
+    return this.accountDao.findAll(poolStatus);
   }
 
   /**
@@ -266,6 +385,24 @@ export class AccountService {
   async getAccount(accountId: string): Promise<Account | null> {
     const account = this.accountDao.findById(accountId);
     return account || null;
+  }
+
+  /**
+   * 手动更新账号池运营状态
+   */
+  async updatePoolStatus(accountId: string, poolStatus: AccountPoolStatus): Promise<Account> {
+    const account = this.accountDao.findById(accountId);
+    if (!account) {
+      throw new Error('账号不存在');
+    }
+
+    this.accountDao.updatePoolStatus(accountId, poolStatus);
+    const updated = this.accountDao.findById(accountId);
+    if (!updated) {
+      throw new Error('账号状态更新失败');
+    }
+
+    return updated;
   }
 
   /**
@@ -282,9 +419,12 @@ export class AccountService {
       // await this.taskService.stopAllTasksByAccount(accountId);
 
       // 从连接池移除客户端并断开连接
-      const client = await this.clientPool.getClient(accountId);
-      if (client) {
-        await client.disconnect();
+      // 删除账号时只清理池内已存在客户端，避免触发会话恢复导致不必要的网络连接重试
+      if (this.clientPool.hasClient(accountId)) {
+        const client = await this.clientPool.getClient(accountId);
+        if (client) {
+          await client.disconnect();
+        }
       }
       await this.clientPool.removeClient(accountId);
 
@@ -379,6 +519,7 @@ export class AccountService {
       if (error.message && error.message.includes('USER_DEACTIVATED')) {
         logger.warn(`账号已被限制: ${account.phoneNumber}`);
         this.accountDao.updateStatus(accountId, 'restricted');
+        this.accountDao.updatePoolStatus(accountId, 'banned');
 
         // 推送状态变化
         wsManager.broadcastAccountStatus({
@@ -492,6 +633,7 @@ export class AccountService {
       if (error.message && error.message.includes('USER_DEACTIVATED')) {
         logger.warn(`账号已被限制，无法重连: ${account.phoneNumber}`);
         this.accountDao.updateStatus(accountId, 'restricted');
+        this.accountDao.updatePoolStatus(accountId, 'banned');
         return false;
       }
 

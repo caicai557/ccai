@@ -6,6 +6,7 @@ import { runMigrations } from '../../database/migrations';
 import { DaoFactory } from '../../database/dao';
 import { ClientPool } from '../../telegram/ClientPool';
 import { CreateTaskDto } from '../../types/task';
+import { TargetAccessCheckInput, TargetAccessCheckResult } from '../target/TargetAccessService';
 
 /**
  * 属性测试：任务状态管理
@@ -14,6 +15,18 @@ import { CreateTaskDto } from '../../types/task';
 describe('TaskService - 任务状态属性测试', () => {
   let db: Database.Database;
   let taskService: TaskService;
+
+  const createMockTargetAccessService = (): {
+    checkAndPrepare: (input: TargetAccessCheckInput) => Promise<TargetAccessCheckResult>;
+  } => ({
+    checkAndPrepare: async (input: TargetAccessCheckInput): Promise<TargetAccessCheckResult> => ({
+      readyPair: {
+        accountId: input.accountId,
+        targetId: input.targetId,
+        telegramId: input.targetId,
+      },
+    }),
+  });
 
   beforeEach(() => {
     db = new Database(':memory:');
@@ -24,7 +37,9 @@ describe('TaskService - 任务状态属性测试', () => {
     // 初始化 DaoFactory
     DaoFactory.initialize(db);
 
-    taskService = new TaskService(db);
+    taskService = new TaskService(db, {
+      targetAccessService: createMockTargetAccessService(),
+    });
   });
 
   afterEach(async () => {
@@ -319,7 +334,9 @@ describe('TaskService - 任务状态属性测试', () => {
             }
 
             // 创建新的TaskService实例（模拟系统重启）
-            const newTaskService = new TaskService(db);
+            const newTaskService = new TaskService(db, {
+              targetAccessService: createMockTargetAccessService(),
+            });
 
             // 恢复运行中的任务
             await newTaskService.restoreRunningTasks();
@@ -382,7 +399,9 @@ describe('TaskService - 任务状态属性测试', () => {
             }
 
             // 创建新的TaskService实例（模拟系统重启）
-            const newTaskService = new TaskService(db);
+            const newTaskService = new TaskService(db, {
+              targetAccessService: createMockTargetAccessService(),
+            });
 
             // 恢复运行中的任务
             await newTaskService.restoreRunningTasks();
@@ -474,7 +493,9 @@ describe('TaskService - 任务状态属性测试', () => {
             }
 
             // 创建新的TaskService实例（模拟系统重启）
-            const newTaskService = new TaskService(db);
+            const newTaskService = new TaskService(db, {
+              targetAccessService: createMockTargetAccessService(),
+            });
 
             // 恢复运行中的任务
             await newTaskService.restoreRunningTasks();

@@ -1,89 +1,97 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Dropdown,
+  Input,
+  Modal,
+  Select,
+  Space,
+  Statistic,
   Table,
   Tag,
-  Button,
-  Space,
-  message,
-  Popconfirm,
   Tooltip,
-  Badge,
-  Tabs,
-  Modal,
-  Form,
-  Select,
-  InputNumber,
+  message,
 } from 'antd';
 import {
-  PlusOutlined,
-  PlayCircleOutlined,
-  PauseCircleOutlined,
-  StopOutlined,
   DeleteOutlined,
-  ReloadOutlined,
-  HistoryOutlined,
   EditOutlined,
-  FileTextOutlined,
+  EllipsisOutlined,
+  HistoryOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  StopOutlined,
+  PlusOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
+import type { MenuProps } from 'antd';
 import { useTaskStore } from '../../stores/task';
 import { tasksApi } from '../../services/api/tasks';
-import { discoveryApi } from '../../services/api/discovery';
-import { accountsApi } from '../../services/api/accounts';
-import { templatesApi } from '../../services/api/templates';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { WsMessageType } from '../../services/websocket/client';
-import type { Task, TaskDraft } from '../../types/task';
+import type { Task } from '../../types/task';
 import { PageHeader } from '../../components/Layout';
-import { TaskForm, TaskHistoryModal } from '../../components/Task';
 import { showError } from '../../utils/notification';
-import type { Account } from '../../types/account';
-import type { Template } from '../../types/template';
+import { RATE_LIMIT_COPY } from '../../constants/rateLimitCopy';
 
-/**
- * 任务列表页面
- */
+const LazyTaskForm = lazy(() =>
+  import('../../components/Task/TaskForm').then((module) => ({ default: module.TaskForm }))
+);
+const LazyTaskHistoryModal = lazy(() =>
+  import('../../components/Task/TaskHistoryModal').then((module) => ({
+    default: module.TaskHistoryModal,
+  }))
+);
+const RATE_LIMIT_TIP_CLOSED_KEY = 'task-rate-limit-tip-closed';
+
 const TaskList: React.FC = () => {
-  const [confirmForm] = Form.useForm();
   const { tasks, setTasks, updateTask, removeTask, setLoading, loading } = useTaskStore();
+
   const [refreshing, setRefreshing] = useState(false);
   const [operatingTaskId, setOperatingTaskId] = useState<string | null>(null);
   const [taskFormVisible, setTaskFormVisible] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'tasks' | 'drafts'>('tasks');
-  const [taskDraftsEnabled, setTaskDraftsEnabled] = useState(true);
-  const [drafts, setDrafts] = useState<TaskDraft[]>([]);
-  const [draftLoading, setDraftLoading] = useState(false);
-  const [draftStatusFilter, setDraftStatusFilter] = useState<'pending' | 'confirmed' | 'rejected' | undefined>(
-    'pending'
-  );
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [confirmModalVisible, setConfirmModalVisible] = useState(false);
-  const [confirmingDraftId, setConfirmingDraftId] = useState<string | null>(null);
-  const [confirmingDraft, setConfirmingDraft] = useState<TaskDraft | null>(null);
-  const [rejectingDraftId, setRejectingDraftId] = useState<string | null>(null);
 
-  // WebSocket 实时更新任务状态
+  const [taskStatusFilter, setTaskStatusFilter] = useState<Task['status'] | undefined>(undefined);
+  const [taskKeyword, setTaskKeyword] = useState('');
+  const [showRateLimitTip, setShowRateLimitTip] = useState(() => {
+    if (typeof window === 'undefined') {
+      return true;
+    }
+    return window.localStorage.getItem(RATE_LIMIT_TIP_CLOSED_KEY) !== '1';
+  });
+
   useWebSocket(
     WsMessageType.TASK_STATUS,
-    (data: any) => {
-      if (data.taskId) {
-        updateTask(data.taskId, {
-          status: data.status,
-          nextExecutionAt: data.nextExecutionAt ? new Date(data.nextExecutionAt) : undefined,
-          lastExecutedAt: data.lastExecutedAt ? new Date(data.lastExecutedAt) : undefined,
-          successCount: data.successCount,
-          failureCount: data.failureCount,
+    (data: unknown) => {
+      if (data && typeof data === 'object' && 'taskId' in data && typeof data.taskId === 'string') {
+        const payload = data as {
+          taskId: string;
+          status?: Task['status'];
+          nextExecutionAt?: string;
+          lastExecutedAt?: string;
+          successCount?: number;
+          failureCount?: number;
+        };
+
+        updateTask(payload.taskId, {
+          status: payload.status,
+          nextExecutionAt: payload.nextExecutionAt ? new Date(payload.nextExecutionAt) : undefined,
+          lastExecutedAt: payload.lastExecutedAt ? new Date(payload.lastExecutedAt) : undefined,
+          successCount: payload.successCount,
+          failureCount: payload.failureCount,
         });
       }
     },
     [updateTask]
   );
 
-  // 加载任务列表
   const loadTasks = async () => {
     try {
       setLoading(true);
@@ -97,54 +105,13 @@ const TaskList: React.FC = () => {
     }
   };
 
-  const loadDrafts = async () => {
-    try {
-      setDraftLoading(true);
-      const data = await discoveryApi.listTaskDrafts({
-        status: draftStatusFilter,
-        page: 1,
-        pageSize: 100,
-      });
-      setDrafts(data.items);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '加载任务草稿失败';
-      if (errorMessage.includes('任务草稿功能未开启')) {
-        setTaskDraftsEnabled(false);
-        if (activeTab === 'drafts') {
-          setActiveTab('tasks');
-        }
-        return;
-      }
-      showError(errorMessage || '加载任务草稿失败');
-      console.error('Failed to load task drafts:', error);
-    } finally {
-      setDraftLoading(false);
-    }
-  };
-
-  const loadAccountsAndTemplates = async () => {
-    try {
-      const [accountList, templateList] = await Promise.all([accountsApi.getAll(), templatesApi.getAll()]);
-      setAccounts(accountList);
-      setTemplates(templateList);
-    } catch (error) {
-      console.error('Failed to load confirm options:', error);
-    }
-  };
-
-  // 刷新任务列表
   const handleRefresh = async () => {
     setRefreshing(true);
-    const jobs: Array<Promise<void>> = [loadTasks()];
-    if (taskDraftsEnabled) {
-      jobs.push(loadDrafts());
-    }
-    await Promise.all(jobs);
+    await loadTasks();
     setRefreshing(false);
     message.success('刷新成功');
   };
 
-  // 启动任务
   const handleStart = async (taskId: string) => {
     try {
       setOperatingTaskId(taskId);
@@ -173,7 +140,6 @@ const TaskList: React.FC = () => {
     }
   };
 
-  // 停止任务
   const handleStop = async (taskId: string) => {
     try {
       setOperatingTaskId(taskId);
@@ -188,7 +154,6 @@ const TaskList: React.FC = () => {
     }
   };
 
-  // 暂停任务（后端语义等同停止）
   const handlePause = async (taskId: string) => {
     try {
       setOperatingTaskId(taskId);
@@ -203,7 +168,6 @@ const TaskList: React.FC = () => {
     }
   };
 
-  // 删除任务
   const handleDelete = async (taskId: string) => {
     try {
       await tasksApi.delete(taskId);
@@ -215,180 +179,110 @@ const TaskList: React.FC = () => {
     }
   };
 
-  // 查看执行历史
+  const handleDeleteWithConfirm = (task: Task) => {
+    Modal.confirm({
+      title: '确认删除任务',
+      content: `任务「${task.name}」删除后将无法恢复，是否继续？`,
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: () => handleDelete(task.id),
+    });
+  };
+
   const handleViewHistory = (taskId: string) => {
     setHistoryTaskId(taskId);
     setHistoryModalVisible(true);
   };
 
-  // 关闭执行历史对话框
   const handleHistoryModalClose = () => {
     setHistoryModalVisible(false);
     setHistoryTaskId(null);
   };
 
-  // 编辑任务
   const handleEdit = (taskId: string) => {
-    const task = tasks.find((t) => t.id === taskId);
+    const task = tasks.find((item) => item.id === taskId);
     if (task) {
       setEditingTask(task);
       setTaskFormVisible(true);
     }
   };
 
-  // 创建任务
   const handleCreate = () => {
     setEditingTask(null);
     setTaskFormVisible(true);
   };
 
-  // 任务表单关闭
   const handleTaskFormClose = () => {
     setTaskFormVisible(false);
     setEditingTask(null);
   };
 
-  // 任务表单成功
   const handleTaskFormSuccess = () => {
-    loadTasks();
+    void loadTasks();
   };
 
-  const openConfirmDraftModal = (draft: TaskDraft) => {
-    const category = draft.taskType === 'group_posting' ? 'group_message' : 'channel_comment';
-    const matchedTemplates = templates.filter(
-      (template) => template.category === category && template.enabled !== false
-    );
-    const defaultTemplateId =
-      draft.templateId ||
-      matchedTemplates[0]?.id ||
-      templates.find((template) => template.enabled !== false)?.id;
-
-    confirmForm.setFieldsValue({
-      accountIds: draft.accountIds,
-      templateId: defaultTemplateId,
-      priority: draft.priority,
-      interval: draft.config.interval ?? 10,
-      randomDelay: draft.config.randomDelay ?? 1,
-      commentProbability: Math.round((draft.config.commentProbability ?? 0.5) * 100),
-      retryOnError: draft.config.retryOnError ?? true,
-      maxRetries: draft.config.maxRetries ?? 3,
-      autoJoinEnabled: draft.config.autoJoinEnabled ?? true,
-      precheckPolicy: draft.config.precheckPolicy ?? 'partial',
-    });
-    setConfirmingDraftId(draft.id);
-    setConfirmingDraft(draft);
-    setConfirmModalVisible(true);
-  };
-
-  const handleConfirmDraft = async () => {
-    if (!confirmingDraftId) {
-      return;
-    }
-
-    try {
-      const values = await confirmForm.validateFields();
-      const payload = {
-        accountIds: values.accountIds,
-        templateId: values.templateId,
-          priority: values.priority,
-          config: {
-            interval: values.interval,
-            randomDelay: values.randomDelay,
-            commentProbability:
-              values.commentProbability !== undefined && values.commentProbability !== null
-                ? Number(values.commentProbability) / 100
-                : undefined,
-            retryOnError: values.retryOnError,
-            maxRetries: values.maxRetries,
-            autoJoinEnabled: values.autoJoinEnabled,
-          precheckPolicy: values.precheckPolicy,
-        },
-      };
-
-      await discoveryApi.confirmTaskDraft(confirmingDraftId, payload);
-      message.success('草稿确认成功，任务已创建');
-      setConfirmModalVisible(false);
-      setConfirmingDraftId(null);
-      setConfirmingDraft(null);
-      confirmForm.resetFields();
-      await Promise.all([loadDrafts(), loadTasks()]);
-    } catch (error) {
-      if ((error as any)?.errorFields) {
-        message.error('请先完成表单必填项');
-        return;
-      }
-      showError((error as Error).message || '确认草稿失败');
+  const handleCloseRateLimitTip = () => {
+    setShowRateLimitTip(false);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(RATE_LIMIT_TIP_CLOSED_KEY, '1');
     }
   };
 
-  const handleRejectDraft = async (draftId: string) => {
-    try {
-      setRejectingDraftId(draftId);
-      await discoveryApi.rejectTaskDraft(draftId, '人工拒绝');
-      message.success('草稿已拒绝');
-      await loadDrafts();
-    } catch (error) {
-      showError((error as Error).message || '拒绝草稿失败');
-    } finally {
-      setRejectingDraftId(null);
-    }
-  };
-
-  // 任务类型标签
   const renderTypeTag = (type: Task['type']) => {
-    const typeConfig = {
-      send_message: {
-        color: 'blue',
-        text: '消息发送',
-      },
-      auto_comment: {
-        color: 'purple',
-        text: '自动评论',
-      },
-    };
-
-    const config = typeConfig[type];
-    return <Tag color={config.color}>{config.text}</Tag>;
+    if (type === 'send_message') {
+      return <Tag color="blue">消息发送</Tag>;
+    }
+    return <Tag color="purple">自动评论</Tag>;
   };
 
-  // 状态标签
   const renderStatusTag = (status: Task['status']) => {
-    const statusConfig = {
-      running: {
-        color: 'success',
-        text: '运行中',
-      },
-      stopped: {
-        color: 'default',
-        text: '已停止',
-      },
-    };
-
-    const config = statusConfig[status];
-    return <Tag color={config.color}>{config.text}</Tag>;
+    if (status === 'running') {
+      return <Tag color="success">运行中</Tag>;
+    }
+    return <Tag>已停止</Tag>;
   };
 
-  // 格式化时间
   const formatTime = (date?: Date) => {
-    if (!date) return '-';
+    if (!date) {
+      return '-';
+    }
     return new Date(date).toLocaleString('zh-CN');
   };
 
-  // 计算成功率
   const calculateSuccessRate = (task: Task): string => {
     const total = task.successCount + task.failureCount;
-    if (total === 0) return '-';
+    if (total === 0) {
+      return '-';
+    }
     const rate = (task.successCount / total) * 100;
     return `${rate.toFixed(1)}%`;
   };
 
-  // 表格列定义
+  const handleTaskActionMenuClick = (record: Task, key: string) => {
+    if (key === 'stop') {
+      void handleStop(record.id);
+      return;
+    }
+    if (key === 'history') {
+      handleViewHistory(record.id);
+      return;
+    }
+    if (key === 'edit') {
+      handleEdit(record.id);
+      return;
+    }
+    if (key === 'delete') {
+      handleDeleteWithConfirm(record);
+    }
+  };
+
   const columns: ColumnsType<Task> = [
     {
       title: '任务名称',
       dataIndex: 'name',
       key: 'name',
-      width: 200,
+      width: 220,
       fixed: 'left',
     },
     {
@@ -409,13 +303,13 @@ const TaskList: React.FC = () => {
       title: '优先级',
       dataIndex: 'priority',
       key: 'priority',
-      width: 80,
+      width: 90,
       sorter: (a, b) => a.priority - b.priority,
     },
     {
       title: '执行统计',
       key: 'stats',
-      width: 150,
+      width: 170,
       render: (_, record) => (
         <Space direction="vertical" size={0}>
           <span>
@@ -440,10 +334,7 @@ const TaskList: React.FC = () => {
       dataIndex: 'nextExecutionAt',
       key: 'nextExecutionAt',
       width: 180,
-      render: (date, record) => {
-        if (record.status !== 'running') return '-';
-        return formatTime(date);
-      },
+      render: (date, record) => (record.status === 'running' ? formatTime(date) : '-'),
     },
     {
       title: '创建时间',
@@ -455,246 +346,123 @@ const TaskList: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 180,
       fixed: 'right',
       render: (_, record) => {
         const isOperating = operatingTaskId === record.id;
 
+        const menuItems: MenuProps['items'] = [
+          {
+            key: 'stop',
+            label: '停止任务',
+            icon: <StopOutlined />,
+            disabled: record.status !== 'running' || isOperating,
+          },
+          {
+            key: 'history',
+            label: '查看历史',
+            icon: <HistoryOutlined />,
+          },
+          {
+            key: 'edit',
+            label: '编辑任务',
+            icon: <EditOutlined />,
+            disabled: record.status === 'running' || isOperating,
+          },
+          {
+            key: 'delete',
+            label: '删除任务',
+            icon: <DeleteOutlined />,
+            disabled: record.status === 'running' || isOperating,
+            danger: true,
+          },
+        ];
+
         return (
-          <Space size="small">
-            {record.status === 'stopped' && (
+          <Space size="small" className="task-row-actions">
+            {record.status === 'stopped' ? (
               <Tooltip title="启动任务">
                 <Button
-                  type="link"
                   size="small"
+                  type="primary"
                   icon={<PlayCircleOutlined />}
-                  onClick={() => handleStart(record.id)}
+                  onClick={() => void handleStart(record.id)}
                   loading={isOperating}
                 >
                   启动
                 </Button>
               </Tooltip>
+            ) : (
+              <Tooltip title="暂停任务">
+                <Button
+                  size="small"
+                  icon={<PauseCircleOutlined />}
+                  onClick={() => void handlePause(record.id)}
+                  loading={isOperating}
+                >
+                  暂停
+                </Button>
+              </Tooltip>
             )}
 
-            {record.status === 'running' && (
-              <>
-                <Tooltip title="暂停任务">
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<PauseCircleOutlined />}
-                    onClick={() => handlePause(record.id)}
-                    loading={isOperating}
-                  >
-                    暂停
-                  </Button>
-                </Tooltip>
-                <Tooltip title="停止任务">
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<StopOutlined />}
-                    onClick={() => handleStop(record.id)}
-                    loading={isOperating}
-                  >
-                    停止
-                  </Button>
-                </Tooltip>
-              </>
-            )}
-
-            <Tooltip title="查看历史">
-              <Button
-                type="link"
-                size="small"
-                icon={<HistoryOutlined />}
-                onClick={() => handleViewHistory(record.id)}
-              >
-                历史
-              </Button>
-            </Tooltip>
-
-            <Tooltip title="编辑任务">
-              <Button
-                type="link"
-                size="small"
-                icon={<EditOutlined />}
-                onClick={() => handleEdit(record.id)}
-                disabled={record.status === 'running'}
-              >
-                编辑
-              </Button>
-            </Tooltip>
-
-            <Popconfirm
-              title="确认删除"
-              description="删除任务后将无法恢复，确定要删除吗？"
-              onConfirm={() => handleDelete(record.id)}
-              okText="确定"
-              cancelText="取消"
+            <Dropdown
+              menu={{
+                items: menuItems,
+                onClick: ({ key }) => handleTaskActionMenuClick(record, key),
+              }}
+              trigger={['click']}
             >
-              <Button
-                type="link"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                disabled={record.status === 'running'}
-              >
-                删除
+              <Button size="small" icon={<EllipsisOutlined />}>
+                更多
               </Button>
-            </Popconfirm>
+            </Dropdown>
           </Space>
         );
       },
     },
   ];
 
-  const draftColumns: ColumnsType<TaskDraft> = [
-    {
-      title: '草稿ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 220,
-      ellipsis: true,
-    },
-    {
-      title: '来源',
-      dataIndex: 'sourceType',
-      key: 'sourceType',
-      width: 140,
-      render: (value: TaskDraft['sourceType']) => {
-        const text =
-          value === 'telegram_dialog_search'
-            ? '账号可见'
-            : value === 'telegram_global_search'
-              ? '全局搜索'
-              : '索引导航';
-        return <Tag>{text}</Tag>;
-      },
-    },
-    {
-      title: '索引源',
-      dataIndex: 'indexBotUsername',
-      key: 'indexBotUsername',
-      width: 140,
-      render: (value?: string) => value || '-',
-    },
-    {
-      title: '批次',
-      dataIndex: 'runId',
-      key: 'runId',
-      width: 220,
-      ellipsis: true,
-      render: (value?: string) => value || '-',
-    },
-    {
-      title: '任务类型',
-      dataIndex: 'taskType',
-      key: 'taskType',
-      width: 120,
-      render: (value: TaskDraft['taskType']) =>
-        value === 'group_posting' ? <Tag color="blue">群发</Tag> : <Tag color="purple">频道监控</Tag>,
-    },
-    {
-      title: '优先级',
-      dataIndex: 'priority',
-      key: 'priority',
-      width: 90,
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 100,
-      render: (value: TaskDraft['status']) => {
-        if (value === 'pending') {
-          return <Tag color="processing">待确认</Tag>;
-        }
-        if (value === 'confirmed') {
-          return <Tag color="success">已确认</Tag>;
-        }
-        return <Tag color="error">已拒绝</Tag>;
-      },
-    },
-    {
-      title: '确认任务ID',
-      dataIndex: 'confirmedTaskId',
-      key: 'confirmedTaskId',
-      width: 220,
-      ellipsis: true,
-      render: (value?: string) => value || '-',
-    },
-    {
-      title: '创建时间',
-      dataIndex: 'createdAt',
-      key: 'createdAt',
-      width: 180,
-      render: (date: string) => new Date(date).toLocaleString('zh-CN'),
-    },
-    {
-      title: '操作',
-      key: 'actions',
-      width: 220,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
-          <Button
-            type="link"
-            size="small"
-            disabled={record.status !== 'pending'}
-            icon={<FileTextOutlined />}
-            onClick={() => openConfirmDraftModal(record)}
-          >
-            确认
-          </Button>
-          <Popconfirm
-            title="确认拒绝"
-            description="拒绝后该草稿不可确认，确定继续吗？"
-            onConfirm={() => handleRejectDraft(record.id)}
-            okText="确定"
-            cancelText="取消"
-            disabled={record.status !== 'pending'}
-          >
-            <Button
-              type="link"
-              size="small"
-              danger
-              disabled={record.status !== 'pending'}
-              loading={rejectingDraftId === record.id}
-            >
-              拒绝
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ];
-
-  // 初始化加载
   useEffect(() => {
-    loadTasks();
-    if (taskDraftsEnabled) {
-      loadDrafts();
-    }
-    loadAccountsAndTemplates();
+    void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (taskDraftsEnabled) {
-      loadDrafts();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftStatusFilter, taskDraftsEnabled]);
+  const filteredTasks = useMemo(() => {
+    const keyword = taskKeyword.trim().toLowerCase();
+    return tasks.filter((task) => {
+      if (taskStatusFilter && task.status !== taskStatusFilter) {
+        return false;
+      }
+      if (!keyword) {
+        return true;
+      }
+      return `${task.name} ${task.id} ${task.templateId} ${task.targetId}`
+        .toLowerCase()
+        .includes(keyword);
+    });
+  }, [taskKeyword, taskStatusFilter, tasks]);
+
+  const runningTaskCount = useMemo(
+    () => filteredTasks.filter((task) => task.status === 'running').length,
+    [filteredTasks]
+  );
+  const stoppedTaskCount = useMemo(
+    () => filteredTasks.filter((task) => task.status === 'stopped').length,
+    [filteredTasks]
+  );
 
   return (
-    <div>
+    <div className="task-page">
       <PageHeader
         title="任务管理"
         subTitle="管理自动化任务"
         extra={
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => void handleRefresh()}
+              loading={refreshing}
+            >
               刷新
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
@@ -704,186 +472,91 @@ const TaskList: React.FC = () => {
         }
       />
 
-      <Tabs
-        activeKey={activeTab}
-        onChange={(key) => setActiveTab(key as 'tasks' | 'drafts')}
-        items={[
-          {
-            key: 'tasks',
-            label: '任务列表',
-            children: (
-              <Table
-                columns={columns}
-                dataSource={tasks}
-                rowKey="id"
-                loading={loading}
-                pagination={{
-                  pageSize: 10,
-                  showSizeChanger: true,
-                  showTotal: (total) => `共 ${total} 个任务`,
-                }}
-                scroll={{ x: 1600 }}
-              />
-            ),
-          },
-          ...(taskDraftsEnabled
-            ? [
-                {
-                  key: 'drafts',
-                  label: '任务草稿',
-                  children: (
-                    <>
-                      <Space style={{ marginBottom: 12 }}>
-                        <Select
-                          allowClear
-                          placeholder="草稿状态"
-                          style={{ width: 160 }}
-                          value={draftStatusFilter}
-                          onChange={(value) => setDraftStatusFilter(value)}
-                          options={[
-                            { label: '待确认', value: 'pending' },
-                            { label: '已确认', value: 'confirmed' },
-                            { label: '已拒绝', value: 'rejected' },
-                          ]}
-                        />
-                        <Button icon={<ReloadOutlined />} onClick={loadDrafts} loading={draftLoading}>
-                          刷新草稿
-                        </Button>
-                      </Space>
-                      <Table
-                        columns={draftColumns}
-                        dataSource={drafts}
-                        rowKey="id"
-                        loading={draftLoading}
-                        pagination={{
-                          pageSize: 10,
-                          showSizeChanger: true,
-                          showTotal: (total) => `共 ${total} 个草稿`,
-                        }}
-                        scroll={{ x: 1700 }}
-                      />
-                    </>
-                  ),
-                },
-              ]
-            : []),
-        ]}
-      />
+      {showRateLimitTip && (
+        <Alert
+          type="warning"
+          showIcon
+          closable
+          message={RATE_LIMIT_COPY.taskListHint}
+          style={{ marginBottom: 16 }}
+          onClose={handleCloseRateLimitTip}
+        />
+      )}
 
-      <TaskForm
-        visible={taskFormVisible}
-        task={editingTask}
-        onClose={handleTaskFormClose}
-        onSuccess={handleTaskFormSuccess}
-      />
+      <div className="task-page__metrics">
+        <Card size="small">
+          <Statistic title="筛选后任务" value={filteredTasks.length} />
+        </Card>
+        <Card size="small">
+          <Statistic title="运行中" value={runningTaskCount} valueStyle={{ color: '#1f8b4d' }} />
+        </Card>
+        <Card size="small">
+          <Statistic title="已停止" value={stoppedTaskCount} valueStyle={{ color: '#637381' }} />
+        </Card>
+        <Card size="small">
+          <Statistic
+            title="任务成功总数"
+            value={filteredTasks.reduce((sum, task) => sum + task.successCount, 0)}
+            valueStyle={{ color: '#0d7a6f' }}
+          />
+        </Card>
+      </div>
 
-      <Modal
-        title="确认任务草稿"
-        open={confirmModalVisible}
-        onCancel={() => {
-          setConfirmModalVisible(false);
-          setConfirmingDraftId(null);
-          setConfirmingDraft(null);
-          confirmForm.resetFields();
+      <Card size="small" className="task-page__filters">
+        <Space wrap size={12}>
+          <Input
+            allowClear
+            placeholder="搜索任务名/任务ID/目标ID"
+            prefix={<SearchOutlined />}
+            value={taskKeyword}
+            onChange={(e) => setTaskKeyword(e.target.value)}
+            style={{ width: 280 }}
+          />
+          <Select
+            allowClear
+            placeholder="任务状态"
+            style={{ width: 150 }}
+            value={taskStatusFilter}
+            onChange={(value) => setTaskStatusFilter(value)}
+            options={[
+              { label: '运行中', value: 'running' },
+              { label: '已停止', value: 'stopped' },
+            ]}
+          />
+        </Space>
+      </Card>
+
+      <Table
+        className="task-page__table"
+        columns={columns}
+        dataSource={filteredTasks}
+        rowKey="id"
+        loading={loading}
+        locale={{ emptyText: '暂无任务，可先创建任务' }}
+        pagination={{
+          pageSize: 10,
+          showSizeChanger: true,
+          showTotal: (total) => `共 ${total} 个任务`,
         }}
-        onOk={handleConfirmDraft}
-        destroyOnClose
-      >
-        <Form form={confirmForm} layout="vertical" autoComplete="off">
-          <Form.Item
-            label="执行账号"
-            name="accountIds"
-            rules={[{ required: true, message: '请选择至少一个账号' }]}
-          >
-            <Select
-              mode="multiple"
-              placeholder="选择账号"
-              options={accounts.map((account) => ({
-                label: `${account.phoneNumber}${account.status === 'online' ? '（在线）' : ''}`,
-                value: account.id,
-              }))}
-            />
-          </Form.Item>
-
-          <Form.Item
-            label="模板"
-            name="templateId"
-            rules={[{ required: true, message: '请选择模板' }]}
-          >
-            <Select
-              placeholder="选择模板"
-              options={templates
-                .filter((template) => template.enabled !== false)
-                .filter((template) => {
-                  if (!confirmingDraft) {
-                    return true;
-                  }
-                  if (confirmingDraft.taskType === 'group_posting') {
-                    return template.category === 'group_message';
-                  }
-                  return template.category === 'channel_comment';
-                })
-                .map((template) => ({
-                  label: template.name || template.content?.slice(0, 30) || template.id,
-                  value: template.id,
-                }))}
-            />
-          </Form.Item>
-
-          <Form.Item label="优先级" name="priority" rules={[{ required: true, message: '请填写优先级' }]}>
-            <InputNumber min={1} max={10} style={{ width: '100%' }} />
-          </Form.Item>
-
-          <Form.Item label="间隔(分钟)" name="interval" rules={[{ required: true, message: '请填写间隔' }]}>
-            <InputNumber min={10} max={1440} style={{ width: '100%' }} />
-          </Form.Item>
-
-          <Form.Item label="随机延迟(分钟)" name="randomDelay">
-            <InputNumber min={0} max={60} style={{ width: '100%' }} />
-          </Form.Item>
-
-          <Form.Item label="评论概率(%)" name="commentProbability">
-            <InputNumber min={0} max={100} style={{ width: '100%' }} />
-          </Form.Item>
-
-          <Form.Item label="重试开关" name="retryOnError">
-            <Select
-              options={[
-                { label: '开启', value: true },
-                { label: '关闭', value: false },
-              ]}
-            />
-          </Form.Item>
-
-          <Form.Item label="最大重试次数" name="maxRetries">
-            <InputNumber min={1} max={10} style={{ width: '100%' }} />
-          </Form.Item>
-
-          <Form.Item label="自动加群" name="autoJoinEnabled">
-            <Select
-              options={[
-                { label: '开启', value: true },
-                { label: '关闭', value: false },
-              ]}
-            />
-          </Form.Item>
-
-          <Form.Item label="预检策略" name="precheckPolicy">
-            <Select
-              options={[
-                { label: 'partial（部分可执行）', value: 'partial' },
-                { label: 'strict（全量可执行）', value: 'strict' },
-              ]}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      <TaskHistoryModal
-        taskId={historyTaskId}
-        visible={historyModalVisible}
-        onClose={handleHistoryModalClose}
+        scroll={{ x: 1500 }}
       />
+
+      <Suspense fallback={null}>
+        <LazyTaskForm
+          visible={taskFormVisible}
+          task={editingTask}
+          onClose={handleTaskFormClose}
+          onSuccess={handleTaskFormSuccess}
+        />
+      </Suspense>
+
+      <Suspense fallback={null}>
+        <LazyTaskHistoryModal
+          taskId={historyTaskId}
+          visible={historyModalVisible}
+          onClose={handleHistoryModalClose}
+        />
+      </Suspense>
     </div>
   );
 };

@@ -7,6 +7,9 @@ import type { ArgsProps as NotificationArgsProps } from 'antd/es/notification';
  */
 
 const defaultMessageDuration = 3;
+const duplicateErrorSuppressMs = 1500;
+let lastErrorMessage = '';
+let lastErrorAt = 0;
 
 // 消息提示配置（maxCount 仅支持 message.config）
 message.config({
@@ -34,6 +37,13 @@ export const showSuccess = (content: string, duration?: number): void => {
  * 错误消息
  */
 export const showError = (content: string, duration?: number): void => {
+  const now = Date.now();
+  if (content === lastErrorMessage && now - lastErrorAt < duplicateErrorSuppressMs) {
+    return;
+  }
+  lastErrorMessage = content;
+  lastErrorAt = now;
+
   message.error({
     content,
     duration: duration ?? defaultMessageDuration,

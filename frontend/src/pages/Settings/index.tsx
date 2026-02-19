@@ -1,7 +1,7 @@
 /**
  * 系统设置页面
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Card,
   Form,
@@ -15,6 +15,7 @@ import {
   Spin,
   Alert,
   Tabs,
+  Statistic,
 } from 'antd';
 import {
   ReloadOutlined,
@@ -29,6 +30,7 @@ import { useConfigStore } from '../../stores/config';
 import type { SystemConfig } from '../../types/config';
 import PageContainer from '../../components/Layout/PageContainer';
 import PageHeader from '../../components/Layout/PageHeader';
+import { RATE_LIMIT_COPY } from '../../constants/rateLimitCopy';
 
 const { Paragraph } = Typography;
 const { TabPane } = Tabs;
@@ -40,7 +42,21 @@ const Settings: React.FC = () => {
   const { config, loading, fetchConfig, updateConfig, resetConfig } = useConfigStore();
   const [form] = Form.useForm();
   const [hasChanges, setHasChanges] = useState(false);
+  const [parallelAccounts, setParallelAccounts] = useState(1);
   const isInitialLoad = React.useRef(true);
+  const watchedRateLimit = Form.useWatch('rateLimit', form) as SystemConfig['rateLimit'] | undefined;
+
+  const rateLimitEstimate = useMemo(() => {
+    const maxPerSecond = Number(watchedRateLimit?.maxPerSecond ?? config?.rateLimit.maxPerSecond ?? 0);
+    const maxPerHour = Number(watchedRateLimit?.maxPerHour ?? config?.rateLimit.maxPerHour ?? 0);
+    const maxPerDay = Number(watchedRateLimit?.maxPerDay ?? config?.rateLimit.maxPerDay ?? 0);
+
+    return {
+      totalPerSecond: maxPerSecond * parallelAccounts,
+      totalPerHour: maxPerHour * parallelAccounts,
+      totalPerDay: maxPerDay * parallelAccounts,
+    };
+  }, [watchedRateLimit, config, parallelAccounts]);
 
   // 加载配置
   useEffect(() => {
@@ -100,6 +116,9 @@ const Settings: React.FC = () => {
         await resetConfig(key);
         isInitialLoad.current = true; // 重置标志
         setHasChanges(false);
+        if (key === 'rateLimit') {
+          setParallelAccounts(1);
+        }
       },
     });
   };
@@ -188,42 +207,54 @@ const Settings: React.FC = () => {
                 </Button>
               }
             >
-              <Paragraph type="secondary">
-                配置Telegram消息发送的速率限制，防止账号被限制。建议使用默认值以确保账号安全。
-              </Paragraph>
+              <Alert
+                type="info"
+                showIcon
+                message={RATE_LIMIT_COPY.settingsInfoTitle}
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {RATE_LIMIT_COPY.settingsInfoBullets.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                }
+                style={{ marginBottom: 16 }}
+              />
+
+              <Paragraph type="secondary">{RATE_LIMIT_COPY.estimatorHint}</Paragraph>
 
               <Form.Item
-                label="每秒最大消息数"
+                label="单账号每秒最大消息数"
                 name={['rateLimit', 'maxPerSecond']}
                 rules={[
                   { required: true, message: '请输入每秒最大消息数' },
                   { type: 'number', min: 0, max: 10, message: '必须在0-10之间' },
                 ]}
-                tooltip="单个账号每秒最多发送的消息数量"
+                tooltip={RATE_LIMIT_COPY.perAccountTooltip}
               >
                 <InputNumber min={0} max={10} style={{ width: '100%' }} />
               </Form.Item>
 
               <Form.Item
-                label="每小时最大消息数"
+                label="单账号每小时最大消息数"
                 name={['rateLimit', 'maxPerHour']}
                 rules={[
                   { required: true, message: '请输入每小时最大消息数' },
                   { type: 'number', min: 0, max: 100, message: '必须在0-100之间' },
                 ]}
-                tooltip="单个账号每小时最多发送的消息数量"
+                tooltip={RATE_LIMIT_COPY.perAccountTooltip}
               >
                 <InputNumber min={0} max={100} style={{ width: '100%' }} />
               </Form.Item>
 
               <Form.Item
-                label="每天最大消息数"
+                label="单账号每天最大消息数"
                 name={['rateLimit', 'maxPerDay']}
                 rules={[
                   { required: true, message: '请输入每天最大消息数' },
                   { type: 'number', min: 0, max: 1000, message: '必须在0-1000之间' },
                 ]}
-                tooltip="单个账号每天最多发送的消息数量"
+                tooltip={RATE_LIMIT_COPY.perAccountTooltip}
               >
                 <InputNumber min={0} max={1000} style={{ width: '100%' }} />
               </Form.Item>
@@ -253,6 +284,39 @@ const Settings: React.FC = () => {
               >
                 <InputNumber min={0} max={30000} style={{ width: '100%' }} addonAfter="ms" />
               </Form.Item>
+
+              <Divider />
+
+              <Card size="small" title={RATE_LIMIT_COPY.estimatorTitle}>
+                <Form.Item
+                  label="并行账号数"
+                  extra={RATE_LIMIT_COPY.estimatorHint}
+                  style={{ marginBottom: 16 }}
+                >
+                  <InputNumber
+                    min={1}
+                    max={200}
+                    style={{ width: '100%' }}
+                    value={parallelAccounts}
+                    onChange={(value) => setParallelAccounts(Number(value) || 1)}
+                  />
+                </Form.Item>
+
+                <Space size={16} wrap style={{ width: '100%' }}>
+                  <Statistic title="估算总每秒" value={rateLimitEstimate.totalPerSecond} />
+                  <Statistic title="估算总每小时" value={rateLimitEstimate.totalPerHour} />
+                  <Statistic title="估算总每天" value={rateLimitEstimate.totalPerDay} />
+                </Space>
+
+                {parallelAccounts > 1 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={RATE_LIMIT_COPY.estimatorWarning}
+                    style={{ marginTop: 12 }}
+                  />
+                )}
+              </Card>
             </Card>
           </TabPane>
 

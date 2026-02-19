@@ -1,4 +1,17 @@
 // 任务相关类型定义
+export type PrecheckPolicy = 'partial' | 'strict';
+
+export type TargetAccessErrorCode =
+  | 'TARGET_NOT_JOINED'
+  | 'TARGET_JOIN_PENDING'
+  | 'TARGET_PRIVATE_NO_INVITE'
+  | 'TARGET_WRITE_FORBIDDEN'
+  | 'TARGET_ACCESS_DENIED'
+  | 'TARGET_JOIN_COOLDOWN'
+  | 'TARGET_JOIN_FAILED'
+  | 'CLIENT_NOT_READY'
+  | 'UNKNOWN_ERROR';
+
 export interface Task {
   id: string;
   type: 'group_posting' | 'channel_monitoring';
@@ -22,6 +35,8 @@ export interface TaskConfig {
   commentProbability?: number; // 评论概率（0-1）
   retryOnError?: boolean; // 失败时是否重试
   maxRetries?: number; // 最大重试次数（默认3次）
+  autoJoinEnabled?: boolean; // 是否启用自动加入目标（默认true）
+  precheckPolicy?: PrecheckPolicy; // 预检失败策略（默认partial）
 }
 
 export interface CreateTaskDto {
@@ -30,4 +45,33 @@ export interface CreateTaskDto {
   targetIds: string[];
   config: TaskConfig;
   priority?: number; // 优先级（1-10，默认5）
+}
+
+export interface TaskReadyPair {
+  accountId: string;
+  targetId: string;
+  telegramId: string;
+}
+
+export interface TaskBlockedPair {
+  accountId: string;
+  targetId: string;
+  telegramId: string;
+  code: TargetAccessErrorCode;
+  message: string;
+  autoJoinAttempted: boolean;
+}
+
+export interface TaskPrecheckSummary {
+  policy: PrecheckPolicy;
+  autoJoinEnabled: boolean;
+  readyPairs: TaskReadyPair[];
+  blockedPairs: TaskBlockedPair[];
+  blockedReasons: Record<string, number>;
+}
+
+export interface TaskStartResult {
+  started: boolean;
+  message: string;
+  precheck: TaskPrecheckSummary;
 }

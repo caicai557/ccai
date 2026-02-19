@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 
 // 加载环境变量
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 /**
  * 服务器配置
@@ -44,24 +44,12 @@ export interface RateLimitConfig {
   messagesPerDay: number;
 }
 
-/**
- * 应用配置
- */
-export interface DiscoveryConfig {
-  enabled: boolean;
-  geminiEnabled: boolean;
-  geminiApiKey?: string;
-  geminiModel: string;
-  requestTimeoutMs: number;
-}
-
 export interface AppConfig {
   server: ServerConfig;
   telegram: TelegramConfig;
   database: DatabaseConfig;
   security: SecurityConfig;
   rateLimit: RateLimitConfig;
-  discovery: DiscoveryConfig;
 }
 
 /**
@@ -109,14 +97,16 @@ export const getTelegramConfig = (): TelegramConfig => {
  */
 export const getDatabaseConfig = (): DatabaseConfig => {
   const dbPath = process.env['DATABASE_PATH'] || config.get<string>('database.path');
+  const backendRoot = path.resolve(__dirname, '../../');
+  const normalizedDbPath = path.isAbsolute(dbPath) ? dbPath : path.resolve(backendRoot, dbPath);
 
   // 确保数据库目录存在
-  const dbDir = path.dirname(dbPath);
+  const dbDir = path.dirname(normalizedDbPath);
   if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
   }
 
-  return { path: dbPath };
+  return { path: normalizedDbPath };
 };
 
 /**
@@ -143,16 +133,6 @@ export const getRateLimitConfig = (): RateLimitConfig => {
   };
 };
 
-export const getDiscoveryConfig = (): DiscoveryConfig => {
-  return {
-    enabled: process.env['DISCOVERY_ENABLED'] !== 'false',
-    geminiEnabled: process.env['DISCOVERY_GEMINI_ENABLED'] !== 'false',
-    geminiApiKey: process.env['GEMINI_API_KEY']?.trim(),
-    geminiModel: process.env['GEMINI_MODEL']?.trim() || 'gemini-3-flash-preview',
-    requestTimeoutMs: Number(process.env['GEMINI_TIMEOUT_MS'] || 8000),
-  };
-};
-
 /**
  * 获取完整应用配置
  */
@@ -163,7 +143,6 @@ export const getAppConfig = (): AppConfig => {
     database: getDatabaseConfig(),
     security: getSecurityConfig(),
     rateLimit: getRateLimitConfig(),
-    discovery: getDiscoveryConfig(),
   };
 };
 

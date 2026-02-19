@@ -1,6 +1,7 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { Api } from 'telegram/tl';
+import { CustomFile } from 'telegram/client/uploads';
 import { getTelegramConfig } from '../config';
 import { logger } from '../utils/logger';
 import { SessionManager } from './SessionManager';
@@ -10,8 +11,8 @@ import {
   TargetPermissionResult,
   TargetResolutionResult,
 } from '../types/targetAccess';
-import { DiscoveredTarget } from '../types/target';
 import { TargetAccessErrorCode } from '../types/task';
+import fs from 'fs';
 
 /**
  * 重连配置接口
@@ -23,6 +24,13 @@ interface ReconnectConfig {
   enableHeartbeat: boolean; // 是否启用心跳检测
   heartbeatInterval: number; // 心跳间隔（毫秒）
 }
+
+type ProfileOperationCode =
+  | 'FLOOD_WAIT'
+  | 'PERMISSION_DENIED'
+  | 'NETWORK_ERROR'
+  | 'AVATAR_INVALID'
+  | 'UNKNOWN_ERROR';
 
 /**
  * Telegram客户端包装类
@@ -515,44 +523,79 @@ export class TelegramClientWrapper {
   }
 
   /**
-   * 搜索当前账号可见的群组/频道
+   * 更新当前账号资料（名字/简介）
    */
-  async searchTargets(keyword: string, limit: number = 50): Promise<DiscoveredTarget[]> {
+  async updateSelfProfile(payload: {
+    firstName?: string;
+    lastName?: string;
+    bio?: string;
+  }): Promise<void> {
     await this.connect();
 
-    const normalizedKeyword = keyword.trim().toLowerCase();
-    const maxLimit = Math.min(Math.max(limit, 1), 200);
-
-    const dialogs = await this.client.getDialogs({ limit: 300 });
-    const discovered: DiscoveredTarget[] = [];
-
-    for (const dialog of dialogs) {
-      const entity = dialog.entity;
-      if (!(entity instanceof Api.Channel || entity instanceof Api.Chat)) {
-        continue;
-      }
-
-      const mapped = this.mapEntityToDiscoveredTarget(entity);
-      if (!mapped) {
-        continue;
-      }
-
-      if (!normalizedKeyword) {
-        discovered.push(mapped);
-      } else {
-        const haystack =
-          `${mapped.title} ${mapped.telegramId} ${mapped.username || ''}`.toLowerCase();
-        if (haystack.includes(normalizedKeyword)) {
-          discovered.push(mapped);
-        }
-      }
-
-      if (discovered.length >= maxLimit) {
-        break;
-      }
+    const firstName = payload.firstName?.trim();
+    const lastName = payload.lastName?.trim();
+    const bio = payload.bio?.trim();
+    if (firstName === undefined && lastName === undefined && bio === undefined) {
+      return;
     }
 
-    return discovered;
+    try {
+      await this.client.invoke(
+        new Api.account.UpdateProfile({
+          firstName,
+          lastName,
+          about: bio,
+        })
+      );
+      logger.info(`账号 ${this.phoneNumber} 资料更新成功`);
+    } catch (error) {
+      throw this.mapProfileOperationError(error, 'profile');
+    }
+  }
+
+  /**
+   * 更新当前账号头像
+   */
+  async updateSelfAvatar(payload: {
+    fileName: string;
+    filePath?: string;
+    fileBuffer?: Buffer;
+  }): Promise<void> {
+    await this.connect();
+
+    const fileName = payload.fileName.trim();
+    if (!fileName) {
+      throw new Error('头像文件名不能为空');
+    }
+
+    if (!payload.filePath && !payload.fileBuffer) {
+      throw new Error('头像文件数据不能为空');
+    }
+
+    const fileSize = payload.fileBuffer?.length ?? fs.statSync(payload.filePath as string).size;
+    const customFile = new CustomFile(
+      fileName,
+      fileSize,
+      payload.filePath || '',
+      payload.fileBuffer
+    );
+
+    try {
+      const uploadedFile = await this.client.uploadFile({
+        file: customFile,
+        workers: 1,
+      });
+
+      await this.client.invoke(
+        new Api.photos.UploadProfilePhoto({
+          file: uploadedFile,
+        })
+      );
+
+      logger.info(`账号 ${this.phoneNumber} 头像更新成功`);
+    } catch (error) {
+      throw this.mapProfileOperationError(error, 'avatar');
+    }
   }
 
   /**
@@ -905,28 +948,6 @@ export class TelegramClientWrapper {
     return this.isConnected;
   }
 
-  private mapEntityToDiscoveredTarget(entity: Api.Channel | Api.Chat): DiscoveredTarget | null {
-    const title = entity.title?.trim();
-    if (!title) {
-      return null;
-    }
-
-    if (entity instanceof Api.Channel) {
-      return {
-        type: entity.megagroup ? 'group' : 'channel',
-        telegramId: entity.id.toString(),
-        title,
-        username: entity.username || undefined,
-      };
-    }
-
-    return {
-      type: 'group',
-      telegramId: entity.id.toString(),
-      title,
-    };
-  }
-
   private toInputChannel(inputPeer: Api.TypeInputPeer): Api.InputChannel | null {
     if (!(inputPeer instanceof Api.InputPeerChannel)) {
       return null;
@@ -966,6 +987,83 @@ export class TelegramClientWrapper {
     return {
       peerType: 'unknown',
     };
+  }
+
+  private mapProfileOperationError(error: unknown, operation: 'profile' | 'avatar'): Error {
+    const raw = this.extractTelegramErrorMessage(error).toUpperCase();
+    const fallback =
+      operation === 'avatar' ? '更新头像失败，请稍后重试' : '更新资料失败，请稍后重试';
+
+    const floodWaitSeconds = this.extractFloodWaitSeconds(raw);
+    if (floodWaitSeconds !== null) {
+      return this.createTypedError(
+        'FLOOD_WAIT',
+        `操作过于频繁，请 ${floodWaitSeconds} 秒后重试`,
+        floodWaitSeconds
+      );
+    }
+
+    if (
+      raw.includes('PHOTO') ||
+      raw.includes('IMAGE_PROCESS_FAILED') ||
+      raw.includes('FILE_PARTS_INVALID')
+    ) {
+      return this.createTypedError('AVATAR_INVALID', '头像文件无效，请更换后重试');
+    }
+
+    if (
+      raw.includes('AUTH_KEY_UNREGISTERED') ||
+      raw.includes('SESSION_REVOKED') ||
+      raw.includes('USER_DEACTIVATED')
+    ) {
+      return this.createTypedError('PERMISSION_DENIED', '账号会话失效或权限不足');
+    }
+
+    if (
+      raw.includes('TIMEOUT') ||
+      raw.includes('ETIMEDOUT') ||
+      raw.includes('ECONNRESET') ||
+      raw.includes('ENOTFOUND') ||
+      raw.includes('NETWORK')
+    ) {
+      return this.createTypedError('NETWORK_ERROR', '网络异常，稍后重试');
+    }
+
+    return this.createTypedError('UNKNOWN_ERROR', raw || fallback);
+  }
+
+  private createTypedError(
+    code: ProfileOperationCode,
+    message: string,
+    retryAfterSeconds?: number
+  ): Error {
+    const err = new Error(message) as Error & {
+      code: ProfileOperationCode;
+      retryAfterSeconds?: number;
+    };
+    err.code = code;
+    if (retryAfterSeconds !== undefined) {
+      err.retryAfterSeconds = retryAfterSeconds;
+    }
+    return err;
+  }
+
+  private extractFloodWaitSeconds(raw: string): number | null {
+    const directMatch = raw.match(/FLOOD_WAIT_?(\d+)/);
+    if (directMatch?.[1]) {
+      return Number(directMatch[1]);
+    }
+
+    const genericMatch = raw.match(/(\d+)\s*SECONDS/);
+    if (genericMatch?.[1]) {
+      return Number(genericMatch[1]);
+    }
+
+    if (raw.includes('FLOOD_WAIT')) {
+      return 60;
+    }
+
+    return null;
   }
 
   private parseTargetAccessError(error: unknown): { code: TargetAccessErrorCode; message: string } {

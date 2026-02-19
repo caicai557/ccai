@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { BaseDao } from './BaseDao';
-import { Account } from '../../types';
+import { Account, AccountPoolStatus } from '../../types';
 
 /**
  * 账号数据访问对象
@@ -13,9 +13,14 @@ export class AccountDao extends BaseDao<Account> {
   /**
    * 查找所有账号
    */
-  findAll(): Account[] {
-    const stmt = this.db.prepare('SELECT * FROM accounts ORDER BY created_at DESC');
-    const rows = stmt.all() as any[];
+  findAll(poolStatus?: AccountPoolStatus): Account[] {
+    const hasPoolFilter = Boolean(poolStatus);
+    const stmt = this.db.prepare(
+      hasPoolFilter
+        ? 'SELECT * FROM accounts WHERE pool_status = ? ORDER BY created_at DESC'
+        : 'SELECT * FROM accounts ORDER BY created_at DESC'
+    );
+    const rows = (hasPoolFilter ? stmt.all(poolStatus) : stmt.all()) as any[];
     return rows.map((row) => this.mapRowToAccount(row));
   }
 
@@ -44,6 +49,8 @@ export class AccountDao extends BaseDao<Account> {
    * 处理蛇形命名到驼峰命名的转换
    */
   private mapRowToAccount(row: any): Account {
+    const lastActive = row.last_active ? new Date(row.last_active) : new Date(row.updated_at);
+
     return {
       id: row.id,
       phoneNumber: row.phone_number,
@@ -53,8 +60,10 @@ export class AccountDao extends BaseDao<Account> {
       lastName: row.last_name,
       addMethod: row.add_method,
       status: row.status,
+      poolStatus: (row.pool_status || 'ok') as AccountPoolStatus,
+      poolStatusUpdatedAt: new Date(row.pool_status_updated_at || row.updated_at),
       healthScore: row.health_score,
-      lastActive: new Date(row.last_active),
+      lastActive,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     };
@@ -70,8 +79,8 @@ export class AccountDao extends BaseDao<Account> {
     const stmt = this.db.prepare(`
       INSERT INTO accounts (
         id, phone_number, session, username, first_name, last_name, 
-        add_method, status, last_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        add_method, status, pool_status, pool_status_updated_at, last_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -83,6 +92,8 @@ export class AccountDao extends BaseDao<Account> {
       data.lastName || null,
       data.addMethod || 'phone',
       data.status || 'offline',
+      data.poolStatus || 'ok',
+      data.poolStatusUpdatedAt || now,
       data.lastActive || null,
       now,
       now
@@ -131,6 +142,14 @@ export class AccountDao extends BaseDao<Account> {
       fields.push('health_score = ?');
       values.push(data.healthScore);
     }
+    if (data.poolStatus !== undefined) {
+      fields.push('pool_status = ?');
+      values.push(data.poolStatus);
+    }
+    if (data.poolStatusUpdatedAt !== undefined) {
+      fields.push('pool_status_updated_at = ?');
+      values.push(data.poolStatusUpdatedAt);
+    }
 
     fields.push('updated_at = ?');
     values.push(now);
@@ -159,6 +178,18 @@ export class AccountDao extends BaseDao<Account> {
       'UPDATE accounts SET status = ?, last_active = ?, updated_at = ? WHERE id = ?'
     );
     const result = stmt.run(status, this.now(), this.now(), id);
+    return result.changes > 0;
+  }
+
+  /**
+   * 更新账号池运营状态
+   */
+  updatePoolStatus(id: string, poolStatus: AccountPoolStatus): boolean {
+    const stmt = this.db.prepare(
+      'UPDATE accounts SET pool_status = ?, pool_status_updated_at = ?, updated_at = ? WHERE id = ?'
+    );
+    const now = this.now();
+    const result = stmt.run(poolStatus, now, now, id);
     return result.changes > 0;
   }
 }

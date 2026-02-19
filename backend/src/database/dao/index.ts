@@ -6,7 +6,8 @@ import { RateLimitDao } from './RateLimitDao';
 import { MessageHistoryDao } from './MessageHistoryDao';
 import { LogDao } from './LogDao';
 import { ConfigDao } from './ConfigDao';
-import { DiscoveryCandidateDao } from './DiscoveryCandidateDao';
+import { AccountProfileJobDao } from './AccountProfileJobDao';
+import { AccountProfileJobItemDao } from './AccountProfileJobItemDao';
 
 /**
  * DAO工厂类
@@ -22,7 +23,8 @@ export class DaoFactory {
   private messageHistoryDao?: MessageHistoryDao;
   private logDao?: LogDao;
   private configDao?: ConfigDao;
-  private discoveryCandidateDao?: DiscoveryCandidateDao;
+  private accountProfileJobDao?: AccountProfileJobDao;
+  private accountProfileJobItemDao?: AccountProfileJobItemDao;
 
   private constructor(db: Database.Database) {
     this.db = db;
@@ -91,11 +93,18 @@ export class DaoFactory {
     return this.configDao;
   }
 
-  getDiscoveryCandidateDao(): DiscoveryCandidateDao {
-    if (!this.discoveryCandidateDao) {
-      this.discoveryCandidateDao = new DiscoveryCandidateDao(this.db);
+  getAccountProfileJobDao(): AccountProfileJobDao {
+    if (!this.accountProfileJobDao) {
+      this.accountProfileJobDao = new AccountProfileJobDao(this.db);
     }
-    return this.discoveryCandidateDao;
+    return this.accountProfileJobDao;
+  }
+
+  getAccountProfileJobItemDao(): AccountProfileJobItemDao {
+    if (!this.accountProfileJobItemDao) {
+      this.accountProfileJobItemDao = new AccountProfileJobItemDao(this.db);
+    }
+    return this.accountProfileJobItemDao;
   }
 }
 
@@ -107,5 +116,6 @@ export {
   MessageHistoryDao,
   LogDao,
   ConfigDao,
-  DiscoveryCandidateDao,
+  AccountProfileJobDao,
+  AccountProfileJobItemDao,
 };

@@ -7,6 +7,7 @@ import { initSchema } from '../../database/schema';
 import { runMigrations } from '../../database/migrations';
 import { DaoFactory } from '../../database/dao';
 import { ClientPool } from '../../telegram/ClientPool';
+import { TargetAccessCheckInput, TargetAccessCheckResult } from '../target/TargetAccessService';
 
 /**
  * 属性测试：任务优先级排序
@@ -20,6 +21,18 @@ describe('TaskService - 属性 28: 任务优先级排序', () => {
   let db: Database.Database;
   let taskService: TaskService;
 
+  const createMockTargetAccessService = (): {
+    checkAndPrepare: (input: TargetAccessCheckInput) => Promise<TargetAccessCheckResult>;
+  } => ({
+    checkAndPrepare: async (input: TargetAccessCheckInput): Promise<TargetAccessCheckResult> => ({
+      readyPair: {
+        accountId: input.accountId,
+        targetId: input.targetId,
+        telegramId: input.targetId,
+      },
+    }),
+  });
+
   beforeEach(() => {
     // 使用内存数据库
     db = new Database(':memory:');
@@ -30,7 +43,9 @@ describe('TaskService - 属性 28: 任务优先级排序', () => {
     // 初始化 DaoFactory
     DaoFactory.initialize(db);
 
-    taskService = new TaskService(db);
+    taskService = new TaskService(db, {
+      targetAccessService: createMockTargetAccessService(),
+    });
   });
 
   afterEach(async () => {

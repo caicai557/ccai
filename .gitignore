@@ -48,3 +48,6 @@ sessions/
 # 配置文件（包含敏感信息）
 config/local.json
 config/production.json
+
+# local large archives
+彩虹新版本群发.rar

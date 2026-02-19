@@ -11,6 +11,29 @@ const router: Router = Router();
 const db = getDatabase();
 const templateService = new TemplateService(db);
 
+const mapTemplateErrorToAppError = (error: unknown): AppError => {
+  const message = error instanceof Error ? error.message : '模板操作失败';
+
+  if (message.includes('模板不存在')) {
+    return new AppError(404, message);
+  }
+
+  if (message.includes('模板正在被任务使用')) {
+    return new AppError(409, message);
+  }
+
+  if (
+    message.includes('模板内容不能为空') ||
+    message.includes('模板分类不能为空') ||
+    message.includes('无效的模板分类') ||
+    message.includes('模板已禁用')
+  ) {
+    return new AppError(400, message);
+  }
+
+  return new AppError(500, message);
+};
+
 /**
  * POST /api/templates
  * 创建模板
@@ -171,7 +194,11 @@ router.delete(
       throw new AppError(404, '模板不存在');
     }
 
-    await templateService.deleteTemplate(id);
+    try {
+      await templateService.deleteTemplate(id);
+    } catch (error) {
+      throw mapTemplateErrorToAppError(error);
+    }
 
     res.json({
       success: true,

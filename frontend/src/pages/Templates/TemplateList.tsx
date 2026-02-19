@@ -1,20 +1,35 @@
-import { useEffect, useState } from 'react';
-import { Table, Tag, Button, Space, message, Popconfirm, Tooltip, Select } from 'antd';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import {
+  Table,
+  Tag,
+  Button,
+  Space,
+  message,
+  Popconfirm,
+  Tooltip,
+  Select,
+  Input,
+  Card,
+  Statistic,
+} from 'antd';
 import {
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
   ReloadOutlined,
   EyeOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useTemplateStore } from '../../stores/template';
 import { templatesApi } from '../../services/api/templates';
 import type { Template } from '../../types/template';
 import { PageHeader } from '../../components/Layout';
-import { TemplateForm, TemplatePreview } from '../../components/Template';
+import { showError } from '../../utils/notification';
 
 const { Option } = Select;
+const LazyTemplateForm = lazy(() => import('../../components/Template/TemplateForm'));
+const LazyTemplatePreview = lazy(() => import('../../components/Template/TemplatePreview'));
 
 /**
  * 模板列表页面
@@ -23,7 +38,8 @@ const TemplateList: React.FC = () => {
   const { templates, setTemplates, removeTemplate, setLoading, loading } = useTemplateStore();
   const [refreshing, setRefreshing] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<'all' | 'message' | 'comment'>('all');
-  const [filteredTemplates, setFilteredTemplates] = useState<Template[]>([]);
+  const [enabledFilter, setEnabledFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [keyword, setKeyword] = useState('');
   const [formVisible, setFormVisible] = useState(false);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
@@ -35,7 +51,7 @@ const TemplateList: React.FC = () => {
       const data = await templatesApi.getAll();
       setTemplates(data);
     } catch (error) {
-      message.error('加载模板列表失败');
+      showError('加载模板列表失败');
       console.error('Failed to load templates:', error);
     } finally {
       setLoading(false);
@@ -200,15 +216,48 @@ const TemplateList: React.FC = () => {
     },
   ];
 
-  // 应用分类过滤
-  useEffect(() => {
-    if (categoryFilter === 'all') {
-      setFilteredTemplates(templates);
-    } else {
-      const category = categoryFilter === 'message' ? 'group_message' : 'channel_comment';
-      setFilteredTemplates(templates.filter((t) => t.category === category));
-    }
-  }, [templates, categoryFilter]);
+  const filteredTemplates = useMemo(() => {
+    const keywordText = keyword.trim().toLowerCase();
+    return templates.filter((item) => {
+      if (categoryFilter !== 'all') {
+        const category = categoryFilter === 'message' ? 'group_message' : 'channel_comment';
+        if (item.category !== category) {
+          return false;
+        }
+      }
+
+      if (enabledFilter !== 'all') {
+        const enabled = item.enabled !== false;
+        if (enabledFilter === 'enabled' && !enabled) {
+          return false;
+        }
+        if (enabledFilter === 'disabled' && enabled) {
+          return false;
+        }
+      }
+
+      if (!keywordText) {
+        return true;
+      }
+
+      const joinedContents = item.contents?.join(' ') || '';
+      const searchText = `${item.name || ''} ${item.content || ''} ${joinedContents}`.toLowerCase();
+      return searchText.includes(keywordText);
+    });
+  }, [templates, categoryFilter, enabledFilter, keyword]);
+
+  const enabledCount = useMemo(
+    () => filteredTemplates.filter((item) => item.enabled !== false).length,
+    [filteredTemplates]
+  );
+  const messageTemplateCount = useMemo(
+    () => filteredTemplates.filter((item) => item.category === 'group_message').length,
+    [filteredTemplates]
+  );
+  const commentTemplateCount = useMemo(
+    () => filteredTemplates.filter((item) => item.category === 'channel_comment').length,
+    [filteredTemplates]
+  );
 
   // 初始化加载
   useEffect(() => {
@@ -222,10 +271,23 @@ const TemplateList: React.FC = () => {
         subTitle="管理消息和评论模板"
         extra={
           <Space>
+            <Input
+              allowClear
+              placeholder="搜索模板名或内容"
+              prefix={<SearchOutlined />}
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              style={{ width: 260 }}
+            />
             <Select value={categoryFilter} onChange={setCategoryFilter} style={{ width: 120 }}>
               <Option value="all">全部分类</Option>
               <Option value="message">群组消息</Option>
               <Option value="comment">频道评论</Option>
+            </Select>
+            <Select value={enabledFilter} onChange={setEnabledFilter} style={{ width: 120 }}>
+              <Option value="all">全部状态</Option>
+              <Option value="enabled">已启用</Option>
+              <Option value="disabled">已禁用</Option>
             </Select>
             <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
               刷新
@@ -237,11 +299,35 @@ const TemplateList: React.FC = () => {
         }
       />
 
+      <Space size={12} wrap style={{ marginBottom: 12 }}>
+        <Card size="small">
+          <Statistic title="筛选后模板" value={filteredTemplates.length} />
+        </Card>
+        <Card size="small">
+          <Statistic title="启用模板" value={enabledCount} valueStyle={{ color: '#1f8b4d' }} />
+        </Card>
+        <Card size="small">
+          <Statistic
+            title="群发模板"
+            value={messageTemplateCount}
+            valueStyle={{ color: '#0d7a6f' }}
+          />
+        </Card>
+        <Card size="small">
+          <Statistic
+            title="评论模板"
+            value={commentTemplateCount}
+            valueStyle={{ color: '#006d9c' }}
+          />
+        </Card>
+      </Space>
+
       <Table
         columns={columns}
         dataSource={filteredTemplates}
         rowKey="id"
         loading={loading}
+        locale={{ emptyText: '暂无模板，可先创建模板' }}
         pagination={{
           pageSize: 10,
           showSizeChanger: true,
@@ -250,24 +336,28 @@ const TemplateList: React.FC = () => {
         scroll={{ x: 1200 }}
       />
 
-      <TemplateForm
-        visible={formVisible}
-        templateId={selectedTemplateId}
-        onClose={() => {
-          setFormVisible(false);
-          setSelectedTemplateId(null);
-        }}
-        onSuccess={handleFormSuccess}
-      />
+      <Suspense fallback={null}>
+        <LazyTemplateForm
+          visible={formVisible}
+          templateId={selectedTemplateId}
+          onClose={() => {
+            setFormVisible(false);
+            setSelectedTemplateId(null);
+          }}
+          onSuccess={handleFormSuccess}
+        />
+      </Suspense>
 
-      <TemplatePreview
-        visible={previewVisible}
-        templateId={selectedTemplateId}
-        onClose={() => {
-          setPreviewVisible(false);
-          setSelectedTemplateId(null);
-        }}
-      />
+      <Suspense fallback={null}>
+        <LazyTemplatePreview
+          visible={previewVisible}
+          templateId={selectedTemplateId}
+          onClose={() => {
+            setPreviewVisible(false);
+            setSelectedTemplateId(null);
+          }}
+        />
+      </Suspense>
     </div>
   );
 };

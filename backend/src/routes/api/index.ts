@@ -9,7 +9,6 @@ import templatesRouter from './templates';
 import logsRouter from './logs';
 import statsRouter from './stats';
 import configRouter from './config';
-import discoveryRouter from './discovery';
 
 const router: Router = Router();
 
@@ -21,7 +20,6 @@ router.use('/templates', templatesRouter);
 router.use('/logs', logsRouter);
 router.use('/stats', statsRouter);
 router.use('/config', configRouter);
-router.use('/discovery', discoveryRouter);
 
 // API根路径
 router.get('/', (_req, res) => {
@@ -36,7 +34,6 @@ router.get('/', (_req, res) => {
       logs: '/api/logs',
       stats: '/api/stats',
       config: '/api/config',
-      discovery: '/api/discovery',
     },
   });
 });

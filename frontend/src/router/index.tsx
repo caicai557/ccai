@@ -1,12 +1,20 @@
+import { lazy, Suspense } from 'react';
+import type { ReactElement } from 'react';
 import { createBrowserRouter } from 'react-router-dom';
-import App from '../App';
-import Dashboard from '../pages/Dashboard';
-import Accounts from '../pages/Accounts';
-import Targets from '../pages/Targets';
-import Templates from '../pages/Templates';
-import Tasks from '../pages/Tasks';
-import Logs from '../pages/Logs';
-import Settings from '../pages/Settings';
+import Loading from '../components/Common/Loading';
+
+const App = lazy(() => import('../App'));
+const Dashboard = lazy(() => import('../pages/Dashboard'));
+const Accounts = lazy(() => import('../pages/Accounts'));
+const Targets = lazy(() => import('../pages/Targets'));
+const Templates = lazy(() => import('../pages/Templates'));
+const Tasks = lazy(() => import('../pages/Tasks'));
+const Logs = lazy(() => import('../pages/Logs'));
+const Settings = lazy(() => import('../pages/Settings'));
+
+const withSuspense = (element: ReactElement) => (
+  <Suspense fallback={<Loading tip="页面加载中..." />}>{element}</Suspense>
+);
 
 /**
  * 应用路由配置
@@ -14,35 +22,35 @@ import Settings from '../pages/Settings';
 export const router = createBrowserRouter([
   {
     path: '/',
-    element: <App />,
+    element: withSuspense(<App />),
     children: [
       {
         index: true,
-        element: <Dashboard />,
+        element: withSuspense(<Dashboard />),
       },
       {
         path: 'accounts',
-        element: <Accounts />,
+        element: withSuspense(<Accounts />),
       },
       {
         path: 'targets',
-        element: <Targets />,
+        element: withSuspense(<Targets />),
       },
       {
         path: 'templates',
-        element: <Templates />,
+        element: withSuspense(<Templates />),
       },
       {
         path: 'tasks',
-        element: <Tasks />,
+        element: withSuspense(<Tasks />),
       },
       {
         path: 'logs',
-        element: <Logs />,
+        element: withSuspense(<Logs />),
       },
       {
         path: 'settings',
-        element: <Settings />,
+        element: withSuspense(<Settings />),
       },
     ],
   },

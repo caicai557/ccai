@@ -1,6 +1,5 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import { API_BASE_URL } from '../../config';
-import { handleError } from '../../utils/errorHandler';
 
 /**
  * API 响应数据结构
@@ -62,16 +61,20 @@ const createAxiosInstance = (): AxiosInstance => {
       if (response.data && typeof response.data.success === 'boolean') {
         if (!response.data.success) {
           const message = response.data.message || response.data.error?.message || '请求失败';
-          const error = new Error(message);
-          handleError(error, { silent: false });
-          return Promise.reject(error);
+          return Promise.reject(new Error(message));
         }
       }
       return response;
     },
     (error: AxiosError<ApiError>) => {
-      // 使用统一的错误处理
-      handleError(error, { silent: false });
+      const responseData = error.response?.data as any;
+      const serverMessage =
+        responseData?.error?.message || responseData?.message || responseData?.error || '';
+
+      if (serverMessage) {
+        return Promise.reject(new Error(String(serverMessage)));
+      }
+
       return Promise.reject(error);
     }
   );

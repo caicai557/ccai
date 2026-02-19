@@ -62,6 +62,7 @@ stop_by_port() {
 }
 
 stop_by_port "后端" "3000"
-stop_by_port "前端" "5173"
+stop_by_port "前端(旧端口)" "5173"
+stop_by_port "前端" "5174"
 
 echo "[dev-down] 完成"

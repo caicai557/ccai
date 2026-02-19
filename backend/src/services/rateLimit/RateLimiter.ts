@@ -99,6 +99,11 @@ export class RateLimiter {
       accountId,
       sentAt: Date.now(),
     });
+
+    const account = this.accountDao.findById(accountId);
+    if (account && account.poolStatus !== 'ok' && account.poolStatus !== 'banned') {
+      this.accountDao.updatePoolStatus(accountId, 'ok');
+    }
   }
 
   /**
@@ -115,6 +120,7 @@ export class RateLimiter {
       this.accountDao.update(accountId, {
         status: 'restricted',
       });
+      this.accountDao.updatePoolStatus(accountId, 'cooldown');
     }
   }
 

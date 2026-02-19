@@ -5,7 +5,7 @@ import type { LogMessage } from '../../types/common';
  * 日志查询参数
  */
 export interface LogQueryParams {
-  level?: 'info' | 'warn' | 'error';
+  level?: 'info' | 'warn' | 'error' | 'debug';
   accountId?: string;
   taskId?: string;
   startDate?: string;
@@ -34,7 +34,7 @@ export const logsApi = {
       total: number;
     }>('/api/logs', params).then((res) => ({
       logs: res.logs.map((log) => ({
-        level: String(log.level || '').toLowerCase() as 'info' | 'warn' | 'error',
+        level: String(log.level || '').toLowerCase() as 'info' | 'warn' | 'error' | 'debug',
         timestamp: log.createdAt,
         accountId: log.accountId,
         message: log.message,
@@ -74,7 +74,10 @@ export const logsApi = {
   /**
    * 按级别获取日志
    */
-  getByLevel: (level: 'info' | 'warn' | 'error', limit: number = 100): Promise<LogMessage[]> => {
+  getByLevel: (
+    level: 'info' | 'warn' | 'error' | 'debug',
+    limit: number = 100
+  ): Promise<LogMessage[]> => {
     return getAllNormalized({ level, limit });
   },
 

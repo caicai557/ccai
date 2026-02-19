@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../database/migrations';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { ClientPool } from '../telegram/ClientPool';
 
 /**
@@ -268,6 +269,49 @@ describe('AccountService', () => {
         fail('应该抛出错误');
       } catch (error: any) {
         expect(error.message).toContain('无效的会话文件格式');
+      }
+    });
+
+    it('应该支持解析Telethon SQLite会话文件格式', async () => {
+      const tempSessionPath = path.join(
+        os.tmpdir(),
+        `telethon-test-${Date.now()}-${Math.random().toString(16).slice(2)}.session`
+      );
+      const sessionDb = new Database(tempSessionPath);
+
+      try {
+        sessionDb.exec(`
+          CREATE TABLE sessions (
+            dc_id INTEGER PRIMARY KEY,
+            server_address TEXT,
+            port INTEGER,
+            auth_key BLOB,
+            takeout_id INTEGER
+          );
+        `);
+
+        const authKey = Buffer.alloc(256, 7);
+        sessionDb
+          .prepare(
+            `
+            INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id)
+            VALUES (?, ?, ?, ?, NULL)
+          `
+          )
+          .run(5, '149.154.171.5', 443, authKey);
+      } finally {
+        sessionDb.close();
+      }
+
+      try {
+        const sessionBuffer = fs.readFileSync(tempSessionPath);
+        const parser = (accountService as any).parseSessionStringFromFile.bind(accountService);
+        const parsed = await parser(sessionBuffer);
+
+        expect(typeof parsed).toBe('string');
+        expect(parsed.startsWith('1')).toBe(true);
+      } finally {
+        fs.rmSync(tempSessionPath, { force: true });
       }
     });
   });
