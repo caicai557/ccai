@@ -44,12 +44,17 @@ export interface RateLimitConfig {
   messagesPerDay: number;
 }
 
+export interface TaskSchedulerConfig {
+  batchRoundRobinEnabled: boolean;
+}
+
 export interface AppConfig {
   server: ServerConfig;
   telegram: TelegramConfig;
   database: DatabaseConfig;
   security: SecurityConfig;
   rateLimit: RateLimitConfig;
+  taskScheduler: TaskSchedulerConfig;
 }
 
 /**
@@ -134,6 +139,16 @@ export const getRateLimitConfig = (): RateLimitConfig => {
 };
 
 /**
+ * 获取任务调度配置
+ */
+export const getTaskSchedulerConfig = (): TaskSchedulerConfig => {
+  return {
+    batchRoundRobinEnabled:
+      (process.env['TASK_BATCH_ROUND_ROBIN_ENABLED'] || 'false').toLowerCase() === 'true',
+  };
+};
+
+/**
  * 获取完整应用配置
  */
 export const getAppConfig = (): AppConfig => {
@@ -143,6 +158,7 @@ export const getAppConfig = (): AppConfig => {
     database: getDatabaseConfig(),
     security: getSecurityConfig(),
     rateLimit: getRateLimitConfig(),
+    taskScheduler: getTaskSchedulerConfig(),
   };
 };
 

@@ -1,5 +1,10 @@
 import { get, post, put, del } from './client';
-import type { Task, TaskConfig, TaskPrecheckSummary, TaskStartResult } from '../../types/task';
+import type {
+  Task,
+  TaskConfig,
+  TaskPrecheckSummary,
+  TaskStartResult,
+} from '../../types/task';
 
 /**
  * 任务执行历史
@@ -44,7 +49,19 @@ interface BackendTaskStats {
   lastExecutionTime?: string;
 }
 
+const normalizeIdList = (primary?: string[], fallback?: string): string[] => {
+  if (Array.isArray(primary) && primary.length > 0) {
+    return primary.map((item) => String(item || '').trim()).filter((item) => item.length > 0);
+  }
+  if (typeof fallback === 'string' && fallback.trim()) {
+    return [fallback.trim()];
+  }
+  return [];
+};
+
 const toFrontendTask = (task: BackendTask, stats?: BackendTaskStats): Task => {
+  const accountIds = Array.isArray(task.accountIds) ? task.accountIds : [];
+  const targetIds = Array.isArray(task.targetIds) ? task.targetIds : [];
   const executionCount = stats?.executionCount ?? 0;
   const failureCount = stats?.failureCount ?? 0;
   const successCount = stats?.successCount ?? Math.max(executionCount - failureCount, 0);
@@ -53,8 +70,10 @@ const toFrontendTask = (task: BackendTask, stats?: BackendTaskStats): Task => {
     id: task.id,
     name: task.config?.['name'] || `任务-${task.id.slice(-6)}`,
     type: task.type === 'group_posting' ? 'send_message' : 'auto_comment',
-    accountId: task.accountIds[0] || '',
-    targetId: task.targetIds[0] || '',
+    accountIds,
+    targetIds,
+    accountId: accountIds[0] || '',
+    targetId: targetIds[0] || '',
     targetType: task.type === 'group_posting' ? 'group' : 'channel',
     templateId: task.config?.['templateId'] || '',
     config: {
@@ -109,18 +128,22 @@ export const tasksApi = {
   create: (data: {
     name: string;
     type: 'send_message' | 'auto_comment';
-    accountId: string;
-    targetId: string;
+    accountIds?: string[];
+    targetIds?: string[];
+    accountId?: string;
+    targetId?: string;
     targetType: 'group' | 'channel';
     templateId: string;
     config: TaskConfig;
     priority?: number;
   }): Promise<Task> => {
+    const accountIds = normalizeIdList(data.accountIds, data.accountId);
+    const targetIds = normalizeIdList(data.targetIds, data.targetId);
     const payload = {
       name: data.name,
       type: data.type === 'send_message' ? 'group_posting' : 'channel_monitoring',
-      accountIds: [data.accountId],
-      targetIds: [data.targetId],
+      accountIds,
+      targetIds,
       priority: data.priority,
       config: {
         interval: data.config?.interval ?? 10,
@@ -146,9 +169,22 @@ export const tasksApi = {
    */
   update: (
     id: string,
-    data: { config?: Partial<TaskConfig>; priority?: number }
+    data: {
+      accountIds?: string[];
+      targetIds?: string[];
+      accountId?: string;
+      targetId?: string;
+      templateId?: string;
+      config?: Partial<TaskConfig>;
+      priority?: number;
+    }
   ): Promise<Task> => {
+    const accountIds = normalizeIdList(data.accountIds, data.accountId);
+    const targetIds = normalizeIdList(data.targetIds, data.targetId);
     const payload = {
+      accountIds: accountIds.length > 0 ? accountIds : undefined,
+      targetIds: targetIds.length > 0 ? targetIds : undefined,
+      templateId: data.templateId,
       priority: data.priority,
       config: data.config
         ? {

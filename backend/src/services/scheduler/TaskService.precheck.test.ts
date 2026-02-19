@@ -133,4 +133,110 @@ describe('TaskService 预检策略', () => {
 
     await taskService.stopTask(task.id);
   });
+
+  it('轮换模式应按群组顺序和账号轮询发送', async () => {
+    const taskService = new TaskService(db, {
+      targetAccessService: createMockTargetAccessService('all-ready'),
+      batchRoundRobinEnabled: true,
+    });
+
+    const sendMessageWithRetry = jest
+      .fn()
+      .mockResolvedValue({ success: true, sentAt: new Date(), messageId: 'msg-id' });
+    const stopListening = jest.fn();
+    const listenToChannel = jest.fn();
+    const getEnabledTemplates = jest.fn().mockResolvedValue([{ id: 'template-1' }]);
+    const generateContent = jest.fn().mockResolvedValue('hello');
+
+    (taskService as any).messageService = {
+      sendMessageWithRetry,
+      stopListening,
+      listenToChannel,
+    };
+    (taskService as any).templateService = {
+      getEnabledTemplates,
+      generateContent,
+    };
+
+    const task = await taskService.createTask({
+      type: 'group_posting',
+      accountIds: ['account-a', 'account-b'],
+      targetIds: ['target-1', 'target-2'],
+      config: {
+        interval: 10,
+        randomDelay: 0,
+        precheckPolicy: 'partial',
+      },
+    });
+
+    await taskService.startTask(task.id);
+    await (taskService as any).executeGroupPostingTask(task.id);
+
+    expect(sendMessageWithRetry).toHaveBeenCalledTimes(2);
+    expect(sendMessageWithRetry.mock.calls[0][0]).toMatchObject({
+      accountId: 'account-a',
+      targetId: 'target-1',
+      targetType: 'group',
+    });
+    expect(sendMessageWithRetry.mock.calls[1][0]).toMatchObject({
+      accountId: 'account-b',
+      targetId: 'target-2',
+      targetType: 'group',
+    });
+
+    const updatedTask = await taskService.getTask(task.id);
+    expect(updatedTask?.config.dispatchState).toBeDefined();
+    expect(updatedTask?.config.dispatchState?.targetCursor).toBe(0);
+    expect(updatedTask?.config.dispatchState?.accountCursor).toBe(0);
+    expect(updatedTask?.config.dispatchState?.consecutiveFailures).toBe(0);
+
+    await taskService.stopTask(task.id);
+  });
+
+  it('轮换模式连续失败达到阈值应自动停止任务', async () => {
+    const taskService = new TaskService(db, {
+      targetAccessService: createMockTargetAccessService('all-ready'),
+      batchRoundRobinEnabled: true,
+    });
+
+    const sendMessageWithRetry = jest.fn().mockResolvedValue({
+      success: false,
+      sentAt: new Date(),
+      error: {
+        code: 'UNKNOWN_ERROR',
+        message: 'mock failure',
+        isFloodWait: false,
+        isRetryable: true,
+      },
+    });
+
+    (taskService as any).messageService = {
+      sendMessageWithRetry,
+      stopListening: jest.fn(),
+      listenToChannel: jest.fn(),
+    };
+    (taskService as any).templateService = {
+      getEnabledTemplates: jest.fn().mockResolvedValue([{ id: 'template-1' }]),
+      generateContent: jest.fn().mockResolvedValue('hello'),
+    };
+
+    const task = await taskService.createTask({
+      type: 'group_posting',
+      accountIds: ['account-a'],
+      targetIds: ['target-1'],
+      config: {
+        interval: 10,
+        randomDelay: 0,
+        maxConsecutiveFailures: 5,
+      },
+    });
+
+    await taskService.startTask(task.id);
+    for (let i = 0; i < 4; i++) {
+      await (taskService as any).executeGroupPostingTask(task.id);
+    }
+
+    const stoppedTask = await taskService.getTask(task.id);
+    expect(stoppedTask?.status).toBe('stopped');
+  });
 });

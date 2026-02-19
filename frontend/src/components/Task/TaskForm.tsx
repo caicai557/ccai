@@ -98,6 +98,14 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
     () => targets.filter((item) => item.type === targetType),
     [targetType, targets]
   );
+  const batchAvailableAccounts = useMemo(
+    () => accounts.filter((item) => item.status === 'online' && item.poolStatus === 'ok'),
+    [accounts]
+  );
+  const batchGroupTargets = useMemo(
+    () => targets.filter((item) => item.type === 'group' && item.enabled),
+    [targets]
+  );
 
   useEffect(() => {
     if (!visible) {
@@ -116,8 +124,10 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
       form.setFieldsValue({
         name: task.name,
         type: task.type,
+        accountIds: task.accountIds,
         accountId: task.accountId,
         targetType: task.targetType,
+        targetIds: task.targetIds,
         targetId: task.targetId,
         templateId: task.templateId,
         priority: task.priority,
@@ -138,6 +148,8 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
       form.setFieldsValue({
         type: 'send_message',
         targetType: 'group',
+        accountIds: [],
+        targetIds: [],
         priority: 5,
         interval: 10,
         commentProbability: 50,
@@ -151,9 +163,46 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
     }
   }, [visible, task, form]);
 
+  useEffect(() => {
+    if (!visible || isEditMode || taskType !== 'send_message') {
+      return;
+    }
+
+    form.setFieldValue('targetType', 'group');
+    setTargetType('group');
+
+    const currentAccountIds = form.getFieldValue('accountIds');
+    if ((!Array.isArray(currentAccountIds) || currentAccountIds.length === 0) && batchAvailableAccounts.length > 0) {
+      form.setFieldValue(
+        'accountIds',
+        batchAvailableAccounts.map((item) => item.id)
+      );
+    }
+
+    const currentTargetIds = form.getFieldValue('targetIds');
+    if ((!Array.isArray(currentTargetIds) || currentTargetIds.length === 0) && batchGroupTargets.length > 0) {
+      form.setFieldValue(
+        'targetIds',
+        batchGroupTargets.map((item) => item.id)
+      );
+    }
+  }, [visible, isEditMode, taskType, batchAvailableAccounts, batchGroupTargets, form]);
+
   const handleTaskTypeChange = (value: 'send_message' | 'auto_comment') => {
     setTaskType(value);
     form.setFieldValue('templateId', undefined);
+    if (value === 'send_message') {
+      setTargetType('group');
+      form.setFieldValue('targetType', 'group');
+      form.setFieldValue('accountId', undefined);
+      form.setFieldValue('targetId', undefined);
+      form.setFieldValue('accountIds', batchAvailableAccounts.map((item) => item.id));
+      form.setFieldValue('targetIds', batchGroupTargets.map((item) => item.id));
+      return;
+    }
+
+    form.setFieldValue('accountIds', []);
+    form.setFieldValue('targetIds', []);
   };
 
   const handleTargetTypeChange = (value: 'group' | 'channel') => {
@@ -167,6 +216,9 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
     }
 
     if (step === 1) {
+      if (taskType === 'send_message') {
+        return ['accountIds', 'targetIds', 'templateId'];
+      }
       return ['accountId', 'targetType', 'targetId', 'templateId'];
     }
 
@@ -222,18 +274,31 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
       }
 
       if (isEditMode && task) {
+        const normalizedAccountIds =
+          values.type === 'send_message' ? values.accountIds || [] : [values.accountId];
+        const normalizedTargetIds =
+          values.type === 'send_message' ? values.targetIds || [] : [values.targetId];
         await tasksApi.update(task.id, {
+          accountIds: normalizedAccountIds,
+          targetIds: normalizedTargetIds,
+          templateId: values.templateId,
           config,
           priority: values.priority,
         });
         message.success('任务更新成功');
       } else {
+        const normalizedAccountIds =
+          values.type === 'send_message' ? values.accountIds || [] : [values.accountId];
+        const normalizedTargetIds =
+          values.type === 'send_message' ? values.targetIds || [] : [values.targetId];
         const createData: CreateTaskRequest = {
           name: values.name,
           type: values.type,
+          accountIds: normalizedAccountIds,
+          targetIds: normalizedTargetIds,
           accountId: values.accountId,
           targetId: values.targetId,
-          targetType: values.targetType,
+          targetType: values.type === 'send_message' ? 'group' : values.targetType,
           templateId: values.templateId,
           config,
           priority: values.priority,
@@ -313,55 +378,157 @@ export const TaskForm: React.FC<TaskFormProps> = ({ visible, task, onClose, onSu
 
   const renderStepTarget = () => (
     <>
-      <Form.Item
-        name="accountId"
-        label="使用账号"
-        rules={[{ required: true, message: '请选择账号' }]}
-      >
-        <Select placeholder="选择账号" disabled={isEditMode}>
-          {accounts.map((account) => (
-            <Option key={account.id} value={account.id}>
-              {account.phoneNumber} - {account.firstName || account.username || '未命名'}
-            </Option>
-          ))}
-        </Select>
-      </Form.Item>
-
-      <Alert type="info" showIcon banner message={RATE_LIMIT_COPY.taskFormHint} style={{ marginBottom: 16 }} />
-
-      <Row gutter={16}>
-        <Col xs={24} md={10}>
+      {taskType === 'send_message' ? (
+        <>
           <Form.Item
-            name="targetType"
-            label="目标类型"
-            rules={[{ required: true, message: '请选择目标类型' }]}
+            name="accountIds"
+            label="使用账号（批量）"
+            rules={[
+              {
+                validator: (_, value: unknown) => {
+                  if (Array.isArray(value) && value.length > 0) {
+                    return Promise.resolve();
+                  }
+                  return Promise.reject(new Error('请至少选择一个账号'));
+                },
+              },
+            ]}
           >
-            <Select
-              placeholder="选择目标类型"
-              onChange={handleTargetTypeChange}
-              disabled={isEditMode}
-            >
-              <Option value="group">群组</Option>
-              <Option value="channel">频道</Option>
+            <Select mode="multiple" placeholder="默认已选全部可用账号">
+              {batchAvailableAccounts.map((account) => (
+                <Option key={account.id} value={account.id}>
+                  {account.phoneNumber} - {account.firstName || account.username || '未命名'}
+                </Option>
+              ))}
             </Select>
           </Form.Item>
-        </Col>
-        <Col xs={24} md={14}>
+          <Space size={8} style={{ marginBottom: 12 }}>
+            <Button
+              size="small"
+              onClick={() =>
+                form.setFieldValue(
+                  'accountIds',
+                  batchAvailableAccounts.map((item) => item.id)
+                )
+              }
+            >
+              全选账号
+            </Button>
+            <Button size="small" onClick={() => form.setFieldValue('accountIds', [])}>
+              清空账号
+            </Button>
+          </Space>
+
+          <Alert
+            type="info"
+            showIcon
+            message="默认使用全部可用账号轮换发送，按群组顺序依次推进"
+            style={{ marginBottom: 12 }}
+          />
+
+          {isEditMode ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="编辑账号/群组集合后会重置轮换指针，从新集合起点重新轮换"
+              style={{ marginBottom: 12 }}
+            />
+          ) : null}
+
           <Form.Item
-            name="targetId"
-            label="目标"
-            rules={[{ required: true, message: '请选择目标' }]}
+            name="targetIds"
+            label="目标群组（批量）"
+            rules={[
+              {
+                validator: (_, value: unknown) => {
+                  if (Array.isArray(value) && value.length > 0) {
+                    return Promise.resolve();
+                  }
+                  return Promise.reject(new Error('请至少选择一个群组'));
+                },
+              },
+            ]}
           >
-            <Select placeholder="选择目标" disabled={isEditMode}>
-              {filteredTargets.map((target) => (
+            <Select mode="multiple" placeholder="默认已选全部启用群组">
+              {batchGroupTargets.map((target) => (
                 <Option key={target.id} value={target.id}>
                   {target.title}
                 </Option>
               ))}
             </Select>
           </Form.Item>
-        </Col>
-      </Row>
+          <Space size={8} style={{ marginBottom: 12 }}>
+            <Button
+              size="small"
+              onClick={() =>
+                form.setFieldValue(
+                  'targetIds',
+                  batchGroupTargets.map((item) => item.id)
+                )
+              }
+            >
+              全选群组
+            </Button>
+            <Button size="small" onClick={() => form.setFieldValue('targetIds', [])}>
+              清空群组
+            </Button>
+          </Space>
+        </>
+      ) : (
+        <>
+          <Form.Item
+            name="accountId"
+            label="使用账号"
+            rules={[{ required: true, message: '请选择账号' }]}
+          >
+            <Select placeholder="选择账号">
+              {accounts.map((account) => (
+                <Option key={account.id} value={account.id}>
+                  {account.phoneNumber} - {account.firstName || account.username || '未命名'}
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+
+          <Row gutter={16}>
+            <Col xs={24} md={10}>
+              <Form.Item
+                name="targetType"
+                label="目标类型"
+                rules={[{ required: true, message: '请选择目标类型' }]}
+              >
+                <Select placeholder="选择目标类型" onChange={handleTargetTypeChange}>
+                  <Option value="group">群组</Option>
+                  <Option value="channel">频道</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={14}>
+              <Form.Item
+                name="targetId"
+                label="目标"
+                rules={[{ required: true, message: '请选择目标' }]}
+              >
+                <Select placeholder="选择目标">
+                  {filteredTargets.map((target) => (
+                    <Option key={target.id} value={target.id}>
+                      {target.title}
+                    </Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      <Alert
+        type="info"
+        showIcon
+        banner
+        message={RATE_LIMIT_COPY.taskFormHint}
+        style={{ marginBottom: 16 }}
+      />
 
       <Form.Item
         name="templateId"

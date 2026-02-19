@@ -8,6 +8,7 @@ import {
   PrecheckPolicy,
   Task,
   TaskBlockedPair,
+  TaskDispatchState,
   TaskPrecheckSummary,
   TaskReadyPair,
   TaskStartResult,
@@ -19,6 +20,7 @@ import {
   TargetAccessCheckResult,
   TargetAccessService,
 } from '../target/TargetAccessService';
+import { getTaskSchedulerConfig } from '../../config';
 import { logger } from '../../utils/logger';
 import { wsManager } from '../../routes/ws';
 
@@ -47,6 +49,7 @@ interface TargetAccessChecker {
 
 interface TaskServiceDeps {
   targetAccessService?: TargetAccessChecker;
+  batchRoundRobinEnabled?: boolean;
 }
 
 /**
@@ -60,6 +63,8 @@ export class TaskService {
   private targetAccessService: TargetAccessChecker;
   private messageService: MessageService;
   private templateService: TemplateService;
+  private batchRoundRobinEnabled: boolean;
+  private readonly defaultMaxConsecutiveFailures = 5;
 
   // 任务执行上下文映射
   private taskContexts: Map<string, TaskExecutionContext> = new Map();
@@ -77,6 +82,8 @@ export class TaskService {
     this.targetAccessService = deps.targetAccessService || new TargetAccessService(this.targetDao);
     this.messageService = new MessageService(db);
     this.templateService = new TemplateService(db);
+    this.batchRoundRobinEnabled =
+      deps.batchRoundRobinEnabled ?? getTaskSchedulerConfig().batchRoundRobinEnabled;
   }
 
   private getBroadcastStats(taskId: string): {
@@ -156,9 +163,20 @@ export class TaskService {
       throw new Error(`任务正在运行，无法更新: ${taskId}`);
     }
 
+    let nextConfig = dto.config;
+    if (nextConfig && (dto.accountIds || dto.targetIds)) {
+      const mergedConfig = { ...(nextConfig as unknown as Record<string, unknown>) };
+      delete mergedConfig['dispatchState'];
+      nextConfig = mergedConfig as unknown as typeof dto.config;
+    }
+
     // 验证任务配置
-    if (dto.config) {
-      this.validateTaskConfig({ ...existing, ...dto } as CreateTaskDto);
+    if (nextConfig) {
+      this.validateTaskConfig({
+        ...existing,
+        ...dto,
+        config: { ...existing.config, ...nextConfig },
+      } as CreateTaskDto);
     }
 
     logger.info(`更新任务: id=${taskId}`);
@@ -167,7 +185,7 @@ export class TaskService {
       type: dto.type,
       accountIds: dto.accountIds,
       targetIds: dto.targetIds,
-      config: dto.config,
+      config: nextConfig,
       priority: dto.priority,
     });
 
@@ -496,6 +514,21 @@ export class TaskService {
     context.isExecuting = true;
 
     try {
+      if (this.batchRoundRobinEnabled) {
+        await this.executeGroupPostingTaskRoundRobin(taskId, context);
+      } else {
+        await this.executeGroupPostingTaskRandom(taskId, context);
+      }
+    } finally {
+      context.isExecuting = false;
+    }
+  }
+
+  private async executeGroupPostingTaskRandom(
+    taskId: string,
+    context: TaskExecutionContext
+  ): Promise<void> {
+    try {
       const { task } = context;
       logger.info(`执行群组发送任务: id=${taskId}`);
 
@@ -517,19 +550,7 @@ export class TaskService {
       }
 
       try {
-        // 生成消息内容（从模板）
-        // 注意：这里简化实现，实际应该从任务配置中获取模板ID
-        // 暂时使用固定的模板分类
-        const templates = await this.templateService.getEnabledTemplates('group_message');
-        if (templates.length === 0) {
-          throw new Error('没有可用的群组消息模板');
-        }
-
-        const template = templates[Math.floor(Math.random() * templates.length)];
-        if (!template) {
-          throw new Error('无法选择模板');
-        }
-        const content = await this.templateService.generateContent(template.id);
+        const content = await this.getRandomGroupMessageContent();
 
         // 添加随机延迟
         if (task.config.randomDelay > 0) {
@@ -613,9 +634,254 @@ export class TaskService {
     } catch (error) {
       context.failureCount++;
       logger.error(`执行群组发送任务失败: ${taskId}`, error);
-    } finally {
-      context.isExecuting = false;
     }
+  }
+
+  private async executeGroupPostingTaskRoundRobin(
+    taskId: string,
+    context: TaskExecutionContext
+  ): Promise<void> {
+    const { task } = context;
+    logger.info(`执行群组发送任务（轮换模式）: id=${taskId}`);
+
+    if (context.readyPairs.length === 0) {
+      logger.warn(`任务无可用账号-目标组合，跳过执行: ${taskId}`);
+      return;
+    }
+
+    const targetIds = task.targetIds;
+    const accountIds = task.accountIds;
+    if (targetIds.length === 0 || accountIds.length === 0) {
+      logger.warn(`任务账号或目标为空，跳过执行: ${taskId}`);
+      return;
+    }
+
+    const dispatchState = this.getDispatchState(task);
+    const targetCursor = this.normalizeCursor(dispatchState.targetCursor, targetIds.length);
+    const accountCursor = this.normalizeCursor(dispatchState.accountCursor, accountIds.length);
+    const targetId = targetIds[targetCursor] || targetIds[0];
+    if (!targetId) {
+      logger.warn(`目标游标无效，跳过执行: ${taskId}`);
+      return;
+    }
+
+    const selected = await this.selectRoundRobinPair(context.readyPairs, accountIds, targetId, accountCursor);
+    if (!selected) {
+      logger.warn(`当前目标无可用账号或均被占用: task=${taskId}, target=${targetId}`);
+      const nextState: TaskDispatchState = {
+        targetCursor: (targetCursor + 1) % targetIds.length,
+        accountCursor,
+        consecutiveFailures: dispatchState.consecutiveFailures + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.persistDispatchState(context, nextState);
+      await this.enforceConsecutiveFailureThreshold(taskId, context, nextState.consecutiveFailures);
+      return;
+    }
+
+    const { pair, accountIndex } = selected;
+    const accountId = pair.accountId;
+    const telegramTargetId = pair.telegramId;
+    let shouldStopTask = false;
+
+    try {
+      const content = await this.getRandomGroupMessageContent();
+
+      if (task.config.randomDelay > 0) {
+        const delayMs = Math.random() * task.config.randomDelay * 60 * 1000;
+        logger.debug(`添加随机延迟: ${Math.round(delayMs / 1000)}秒`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      const maxRetries = this.getMaxRetries(task);
+      const result = await this.messageService.sendMessageWithRetry(
+        {
+          accountId,
+          targetId: telegramTargetId,
+          targetType: 'group',
+          content,
+        },
+        maxRetries
+      );
+
+      if (result.success) {
+        context.executionCount++;
+        context.lastExecutionTime = new Date();
+        this.taskExecutionDao.create({
+          taskId,
+          executedAt: new Date(),
+          success: true,
+          messageContent: content,
+          accountId,
+          targetId: pair.targetId,
+          retryCount: 0,
+        });
+
+        const nextState: TaskDispatchState = {
+          targetCursor: (targetCursor + 1) % targetIds.length,
+          accountCursor: (accountIndex + 1) % accountIds.length,
+          consecutiveFailures: 0,
+          updatedAt: new Date().toISOString(),
+        };
+        await this.persistDispatchState(context, nextState);
+        this.broadcastTaskStatus(taskId);
+        logger.info(
+          `✅ 群组消息发送成功(轮换): task=${taskId}, account=${accountId}, target=${telegramTargetId}`
+        );
+        return;
+      }
+
+      context.failureCount++;
+      this.taskExecutionDao.create({
+        taskId,
+        executedAt: new Date(),
+        success: false,
+        messageContent: content,
+        errorMessage: result.error?.message || '未知错误',
+        accountId,
+        targetId: pair.targetId,
+        retryCount: maxRetries - 1,
+      });
+
+      if (result.error?.code === 'PERMISSION_DENIED') {
+        this.blockReadyPair(
+          context,
+          {
+            accountId,
+            targetId: pair.targetId,
+            telegramId: telegramTargetId,
+            code: 'TARGET_WRITE_FORBIDDEN',
+            message: result.error.message || '账号没有发言权限',
+            autoJoinAttempted: false,
+          },
+          taskId
+        );
+      }
+
+      const nextFailures = dispatchState.consecutiveFailures + 1;
+      const nextState: TaskDispatchState = {
+        targetCursor: (targetCursor + 1) % targetIds.length,
+        accountCursor: (accountIndex + 1) % accountIds.length,
+        consecutiveFailures: nextFailures,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.persistDispatchState(context, nextState);
+      this.broadcastTaskStatus(taskId);
+      logger.error(`❌ 群组消息发送失败(轮换): task=${taskId}, error=${result.error?.message}`);
+
+      shouldStopTask = this.shouldStopByConsecutiveFailures(task, nextFailures);
+    } catch (error) {
+      context.failureCount++;
+      logger.error(`执行群组发送任务失败(轮换): ${taskId}`, error);
+    } finally {
+      this.releaseAccountLock(accountId);
+    }
+
+    if (shouldStopTask) {
+      await this.stopTask(taskId);
+    }
+  }
+
+  private async getRandomGroupMessageContent(): Promise<string> {
+    const templates = await this.templateService.getEnabledTemplates('group_message');
+    if (templates.length === 0) {
+      throw new Error('没有可用的群组消息模板');
+    }
+
+    const template = templates[Math.floor(Math.random() * templates.length)];
+    if (!template) {
+      throw new Error('无法选择模板');
+    }
+    return this.templateService.generateContent(template.id);
+  }
+
+  private getDispatchState(task: Task): TaskDispatchState {
+    const rawState = task.config.dispatchState;
+    if (!rawState) {
+      return {
+        targetCursor: 0,
+        accountCursor: 0,
+        consecutiveFailures: 0,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    return {
+      targetCursor: Number.isFinite(rawState.targetCursor) ? Math.max(0, rawState.targetCursor) : 0,
+      accountCursor: Number.isFinite(rawState.accountCursor) ? Math.max(0, rawState.accountCursor) : 0,
+      consecutiveFailures: Number.isFinite(rawState.consecutiveFailures)
+        ? Math.max(0, rawState.consecutiveFailures)
+        : 0,
+      updatedAt: rawState.updatedAt || new Date().toISOString(),
+    };
+  }
+
+  private normalizeCursor(cursor: number, size: number): number {
+    if (size <= 0) {
+      return 0;
+    }
+    return ((cursor % size) + size) % size;
+  }
+
+  private async persistDispatchState(
+    context: TaskExecutionContext,
+    state: TaskDispatchState
+  ): Promise<void> {
+    const nextConfig = {
+      ...context.task.config,
+      dispatchState: state,
+    };
+    const updated = this.taskDao.update(context.task.id, {
+      config: nextConfig,
+    });
+    if (updated) {
+      context.task = updated;
+      return;
+    }
+    context.task = {
+      ...context.task,
+      config: nextConfig,
+    };
+  }
+
+  private async selectRoundRobinPair(
+    readyPairs: TaskReadyPair[],
+    accountIds: string[],
+    targetId: string,
+    accountCursor: number
+  ): Promise<{ pair: TaskReadyPair; accountIndex: number } | null> {
+    for (let offset = 0; offset < accountIds.length; offset++) {
+      const accountIndex = (accountCursor + offset) % accountIds.length;
+      const accountId = accountIds[accountIndex];
+      if (!accountId) {
+        continue;
+      }
+      const pair = readyPairs.find((item) => item.accountId === accountId && item.targetId === targetId);
+      if (!pair) {
+        continue;
+      }
+      if (await this.acquireAccountLock(accountId)) {
+        return { pair, accountIndex };
+      }
+    }
+
+    return null;
+  }
+
+  private shouldStopByConsecutiveFailures(task: Task, consecutiveFailures: number): boolean {
+    const threshold = Math.max(1, task.config.maxConsecutiveFailures || this.defaultMaxConsecutiveFailures);
+    return consecutiveFailures >= threshold;
+  }
+
+  private async enforceConsecutiveFailureThreshold(
+    taskId: string,
+    context: TaskExecutionContext,
+    consecutiveFailures: number
+  ): Promise<void> {
+    if (!this.shouldStopByConsecutiveFailures(context.task, consecutiveFailures)) {
+      return;
+    }
+    await this.stopTask(taskId);
   }
 
   /**

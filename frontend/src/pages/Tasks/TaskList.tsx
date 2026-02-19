@@ -436,7 +436,7 @@ const TaskList: React.FC = () => {
       if (!keyword) {
         return true;
       }
-      return `${task.name} ${task.id} ${task.templateId} ${task.targetId}`
+      return `${task.name} ${task.id} ${task.templateId} ${task.targetId} ${task.targetIds.join(' ')} ${task.accountIds.join(' ')}`
         .toLowerCase()
         .includes(keyword);
     });

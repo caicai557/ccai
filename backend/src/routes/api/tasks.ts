@@ -6,10 +6,123 @@ import { asyncHandler, AppError } from '../../middleware/errorHandler';
 import { TaskService } from '../../services/scheduler/TaskService';
 import { logger } from '../../utils/logger';
 import { getDatabase } from '../../database/init';
+import { CreateTaskDto, Task } from '../../types/task';
 
 const router: Router = Router();
 const db = getDatabase();
 const taskService = new TaskService(db);
+
+export const restoreTaskSchedulers = async (): Promise<void> => {
+  await taskService.restoreRunningTasks();
+};
+
+const parseArrayField = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter((item) => item.length > 0);
+  }
+
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item || '').trim()).filter((item) => item.length > 0);
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return trimmed
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+};
+
+const normalizeTaskPayload = (
+  rawPayload: Record<string, unknown>,
+  existingTask?: Task
+): Record<string, unknown> => {
+  const hasAccountField =
+    Object.prototype.hasOwnProperty.call(rawPayload, 'accountIds') ||
+    Object.prototype.hasOwnProperty.call(rawPayload, 'accountId');
+  const hasTargetField =
+    Object.prototype.hasOwnProperty.call(rawPayload, 'targetIds') ||
+    Object.prototype.hasOwnProperty.call(rawPayload, 'targetId');
+
+  let accountIds: string[] | undefined;
+  if (hasAccountField) {
+    const arrayValue = parseArrayField(rawPayload['accountIds']);
+    if (arrayValue.length > 0) {
+      accountIds = arrayValue;
+    } else if (typeof rawPayload['accountId'] === 'string' && rawPayload['accountId'].trim()) {
+      accountIds = [rawPayload['accountId'].trim()];
+    } else {
+      accountIds = [];
+    }
+  }
+
+  let targetIds: string[] | undefined;
+  if (hasTargetField) {
+    const arrayValue = parseArrayField(rawPayload['targetIds']);
+    if (arrayValue.length > 0) {
+      targetIds = arrayValue;
+    } else if (typeof rawPayload['targetId'] === 'string' && rawPayload['targetId'].trim()) {
+      targetIds = [rawPayload['targetId'].trim()];
+    } else {
+      targetIds = [];
+    }
+  }
+
+  const rawConfig = rawPayload['config'];
+  const configFromPayload =
+    rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
+      ? ({ ...(rawConfig as Record<string, unknown>) } as Record<string, unknown>)
+      : undefined;
+  let normalizedConfig = configFromPayload;
+
+  const trimmedTemplateId =
+    typeof rawPayload['templateId'] === 'string' ? rawPayload['templateId'].trim() : '';
+  if (trimmedTemplateId) {
+    normalizedConfig = normalizedConfig || ({ ...(existingTask?.config || {}) } as Record<string, unknown>);
+    normalizedConfig['templateId'] = trimmedTemplateId;
+  }
+
+  const trimmedName = typeof rawPayload['name'] === 'string' ? rawPayload['name'].trim() : '';
+  if (trimmedName) {
+    normalizedConfig = normalizedConfig || ({ ...(existingTask?.config || {}) } as Record<string, unknown>);
+    normalizedConfig['name'] = trimmedName;
+  }
+
+  if (existingTask && (hasAccountField || hasTargetField)) {
+    normalizedConfig = normalizedConfig || ({ ...(existingTask.config || {}) } as Record<string, unknown>);
+    delete normalizedConfig['dispatchState'];
+  }
+
+  const normalizedPayload: Record<string, unknown> = {
+    ...rawPayload,
+  };
+
+  if (accountIds !== undefined) {
+    normalizedPayload['accountIds'] = accountIds;
+  }
+  if (targetIds !== undefined) {
+    normalizedPayload['targetIds'] = targetIds;
+  }
+  if (normalizedConfig !== undefined) {
+    normalizedPayload['config'] = normalizedConfig;
+  }
+
+  return normalizedPayload;
+};
 
 const mapTaskErrorToAppError = (error: unknown): AppError => {
   const message = error instanceof Error ? error.message : '任务操作失败';
@@ -36,13 +149,17 @@ const mapTaskErrorToAppError = (error: unknown): AppError => {
 router.post(
   '/',
   asyncHandler(async (req: Request, res: Response) => {
-    const taskDto = req.body;
+    const taskDto = normalizeTaskPayload(req.body || {}) as unknown as CreateTaskDto;
 
     if (!taskDto.type) {
       throw new AppError(400, '缺少必需参数');
     }
 
-    logger.info(`创建任务: ${taskDto.name || taskDto.type}`);
+    const taskName =
+      taskDto.config && typeof taskDto.config === 'object'
+        ? ((taskDto.config as unknown as Record<string, unknown>)['name'] as string | undefined)
+        : undefined;
+    logger.info(`创建任务: ${taskName || taskDto.type}`);
 
     const task = await taskService.createTask(taskDto).catch((error) => {
       throw mapTaskErrorToAppError(error);
@@ -131,7 +248,7 @@ router.put(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const taskDto = req.body;
+    const rawTaskDto = req.body;
 
     if (!id) {
       throw new AppError(400, '任务ID不能为空');
@@ -143,6 +260,8 @@ router.put(
     if (!existingTask) {
       throw new AppError(404, '任务不存在');
     }
+
+    const taskDto = normalizeTaskPayload(rawTaskDto || {}, existingTask) as Partial<CreateTaskDto>;
 
     const task = await taskService.updateTask(id, taskDto).catch((error) => {
       throw mapTaskErrorToAppError(error);

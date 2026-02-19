@@ -462,6 +462,74 @@ describe('API端点集成测试', () => {
     });
   });
 
+  describe('任务管理API兼容', () => {
+    test('POST /api/tasks 应该兼容旧单值字段 accountId/targetId', async () => {
+      const response = await request(app).post('/api/tasks').send({
+        name: '旧字段兼容任务',
+        type: 'group_posting',
+        accountId: 'legacy-account-id',
+        targetId: 'legacy-target-id',
+        templateId: 'legacy-template-id',
+        config: {
+          interval: 10,
+          randomDelay: 0,
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('success', true);
+      expect(response.body.data.task.accountIds).toEqual(['legacy-account-id']);
+      expect(response.body.data.task.targetIds).toEqual(['legacy-target-id']);
+      expect(response.body.data.task.config.templateId).toBe('legacy-template-id');
+    });
+
+    test('PUT /api/tasks/:id 修改账号或目标集合时应重置 dispatchState', async () => {
+      const createResponse = await request(app).post('/api/tasks').send({
+        name: 'dispatch-state-reset-task',
+        type: 'group_posting',
+        accountIds: ['reset-account-1'],
+        targetIds: ['reset-target-1'],
+        config: {
+          interval: 10,
+          randomDelay: 0,
+          dispatchState: {
+            targetCursor: 1,
+            accountCursor: 1,
+            consecutiveFailures: 3,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      });
+
+      expect(createResponse.status).toBe(200);
+      const taskId = createResponse.body.data.task.id;
+      expect(taskId).toBeTruthy();
+
+      const updateResponse = await request(app).put(`/api/tasks/${taskId}`).send({
+        accountIds: ['reset-account-2', 'reset-account-3'],
+        targetIds: ['reset-target-2'],
+        config: {
+          interval: 10,
+          randomDelay: 0,
+          dispatchState: {
+            targetCursor: 5,
+            accountCursor: 5,
+            consecutiveFailures: 5,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      });
+
+      expect(updateResponse.status).toBe(200);
+      expect(updateResponse.body.data.task.accountIds).toEqual([
+        'reset-account-2',
+        'reset-account-3',
+      ]);
+      expect(updateResponse.body.data.task.targetIds).toEqual(['reset-target-2']);
+      expect(updateResponse.body.data.task.config.dispatchState).toBeUndefined();
+    });
+  });
+
   describe('错误处理', () => {
     test('访问不存在的端点应该返回404', async () => {
       const response = await request(app).get('/api/nonexistent');

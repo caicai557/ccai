@@ -42,9 +42,11 @@ const bootstrap = async (): Promise<void> => {
 
     const { createApp } = await import('./app');
     const app = createApp();
+    const { restoreTaskSchedulers } = await import('./routes/api/tasks');
 
     server = createServer(app);
     await startServer(server);
+    await restoreTaskSchedulers();
 
     process.on('SIGTERM', () => {
       void gracefulShutdown('SIGTERM');

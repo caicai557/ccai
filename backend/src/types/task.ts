@@ -28,6 +28,8 @@ export interface Task {
 export interface TaskConfig {
   interval: number; // 间隔（分钟）
   randomDelay: number; // 随机延迟（分钟）
+  dispatchState?: TaskDispatchState; // 群发轮换状态（内部持久化）
+  maxConsecutiveFailures?: number; // 连续失败阈值（默认5）
   timeRange?: {
     start: string; // HH:mm
     end: string; // HH:mm
@@ -37,6 +39,13 @@ export interface TaskConfig {
   maxRetries?: number; // 最大重试次数（默认3次）
   autoJoinEnabled?: boolean; // 是否启用自动加入目标（默认true）
   precheckPolicy?: PrecheckPolicy; // 预检失败策略（默认partial）
+}
+
+export interface TaskDispatchState {
+  targetCursor: number;
+  accountCursor: number;
+  consecutiveFailures: number;
+  updatedAt: string;
 }
 
 export interface CreateTaskDto {

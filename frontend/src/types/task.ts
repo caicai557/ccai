@@ -16,6 +16,8 @@ export interface Task {
   id: string;
   name: string;
   type: 'send_message' | 'auto_comment';
+  accountIds: string[];
+  targetIds: string[];
   accountId: string;
   targetId: string;
   targetType: 'group' | 'channel';
@@ -45,8 +47,10 @@ export interface TaskConfig {
 export interface CreateTaskRequest {
   name: string;
   type: 'send_message' | 'auto_comment';
-  accountId: string;
-  targetId: string;
+  accountIds?: string[];
+  targetIds?: string[];
+  accountId?: string; // 兼容旧调用
+  targetId?: string; // 兼容旧调用
   targetType: 'group' | 'channel';
   templateId: string;
   config: TaskConfig;
@@ -54,6 +58,11 @@ export interface CreateTaskRequest {
 }
 
 export interface UpdateTaskRequest {
+  accountIds?: string[];
+  targetIds?: string[];
+  accountId?: string; // 兼容旧调用
+  targetId?: string; // 兼容旧调用
+  templateId?: string;
   config?: Partial<TaskConfig>;
   priority?: number;
 }
